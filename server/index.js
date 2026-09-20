@@ -1,0 +1,415 @@
+'use strict';
+
+const path = require('path');
+const { REPO_ROOT } = require('./paths'); // exits with a clear message when the test project cannot be found
+const express = require('express');
+const cors = require('cors');
+const { WebSocketServer } = require('ws');
+const { listProjects, listPods, listDeployments, listServices, listSecretsMeta } = require('./oc');
+const { RunManager } = require('./runManager');
+const scenarioCatalog = require('./scenarioCatalog');
+const testBuilder = require('./testBuilder');
+const tempo = require('./tempo');
+const explorer = require('./explorer');
+const gitApi = require('./git');
+
+const PORT = process.env.DASHBOARD_PORT || 4570;
+
+const app = express();
+app.use(cors());
+app.use(express.json({ limit: '5mb' }));
+
+// runId -> Set<ws>
+const subscribers = new Map();
+function broadcast(runId, message) {
+  const set = subscribers.get(runId);
+  if (!set) return;
+  const payload = JSON.stringify(message);
+  for (const ws of set) {
+    if (ws.readyState === ws.OPEN) ws.send(payload);
+  }
+}
+
+const runManager = new RunManager(broadcast);
+testBuilder.cleanupDrafts(); // drop drafts a previous crash may have left behind
+
+app.get('/api/health', (req, res) => res.json({ ok: true }));
+
+app.get('/api/defaults', (req, res) => {
+  res.json({
+    namespaceFilter: 'dev-main',
+    exclusionLabels: ['eid'],
+    ssh: {
+      host: process.env.SSH_HOST || '',
+      user: process.env.SSH_USER || '',
+      keyPath: process.env.SSH_KEY || '',
+    },
+  });
+});
+
+app.post('/api/oc/projects', async (req, res) => {
+  try {
+    const projects = await listProjects(req.body || {});
+    res.json({ projects });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// Fetches pods across one or more oc namespaces/projects at once (e.g. "dev-main" +
+// "dev-main-idbroker"), tagging every pod with the namespace it came from so the
+// dashboard can tail the right one and disambiguate same-named pods.
+app.post('/api/oc/pods', async (req, res) => {
+  const { namespaces, ...cfg } = req.body || {};
+  if (!namespaces || !namespaces.length) return res.status(400).json({ error: 'at least one namespace is required' });
+  const pods = [];
+  const errors = [];
+  for (const ns of namespaces) {
+    try {
+      const nsPods = await listPods(cfg, ns);
+      for (const p of nsPods) pods.push({ ...p, namespace: ns });
+    } catch (err) {
+      errors.push({ namespace: ns, message: err.message });
+    }
+  }
+  res.json({ pods, errors });
+});
+
+// Reads config/**/*.yaml (same files pytest_generate_tests scans) so a dev can pick
+// a label and immediately see which namespaces support it, without reading code.
+app.get('/api/scenarios/labels', (req, res) => {
+  try {
+    res.json({ labels: scenarioCatalog.allLabels() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/scenarios/resolve', (req, res) => {
+  try {
+    const labels = req.query.labels || '';
+    const exclusionLabels = req.query.exclusionLabels
+      ? String(req.query.exclusionLabels).split(/[\s,]+/).filter(Boolean)
+      : [];
+    const { scenarios, namespaces } = scenarioCatalog.resolve(labels, exclusionLabels);
+    res.json({
+      namespaces,
+      scenarios: scenarios.map((s) => ({ name: s.name, description: s.description, labels: s.labels, supportedNamespaces: s.supportedNamespaces })),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Read-only OpenShift resource browser for the Deployments tab. Deliberately no
+// mutating routes (scale/restart/delete/edit) - this workspace's OpenShift safety
+// rules treat those as requiring explicit human approval every time, which doesn't
+// fit a shared, always-on dashboard. Secrets are metadata-only: see listSecretsMeta.
+app.post('/api/oc/deployments', async (req, res) => {
+  const { namespace, ...cfg } = req.body || {};
+  if (!namespace) return res.status(400).json({ error: 'namespace is required' });
+  try {
+    res.json({ deployments: await listDeployments(cfg, namespace) });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.post('/api/oc/services', async (req, res) => {
+  const { namespace, ...cfg } = req.body || {};
+  if (!namespace) return res.status(400).json({ error: 'namespace is required' });
+  try {
+    res.json({ services: await listServices(cfg, namespace) });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.post('/api/oc/secrets', async (req, res) => {
+  const { namespace, ...cfg } = req.body || {};
+  if (!namespace) return res.status(400).json({ error: 'namespace is required' });
+  try {
+    res.json({ secrets: await listSecretsMeta(cfg, namespace) });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// "Create test case" tab. Read-only against existing config; the only write is a
+// single new file under config/tickets/ (see testBuilder.saveTestCase).
+app.get('/api/builder/schema', (req, res) => {
+  try {
+    res.json(testBuilder.getSchema());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/builder/catalog', (req, res) => {
+  try {
+    res.json(testBuilder.getCatalogPayload());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/builder/preview', (req, res) => {
+  res.json(testBuilder.buildTestCase(req.body || {}));
+});
+
+// Raw YAML of blocks as they would be written to a config file (read-only, nothing is saved).
+app.post('/api/builder/yaml', (req, res) => {
+  try {
+    const sections = Array.isArray(req.body?.sections) ? req.body.sections : [];
+    const out = sections.map((s) => {
+      if (!['workflows', 'endpoint_interactions', 'scenarios'].includes(s.key)) throw new Error('unknown section');
+      const items = Array.isArray(s.items) ? s.items : [];
+      const yaml = items.length ? testBuilder.itemsBlock(s.key, items).replace(/^ {2}/gm, '') : '';
+      return { key: s.key, yaml, block: items.length ? `${s.key}:\n${testBuilder.itemsBlock(s.key, items)}` : '' };
+    });
+    res.json({ sections: out, document: out.map((s) => s.block).filter(Boolean).join('\n\n') + '\n' });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Parses hand-edited YAML from the editor; nothing is written anywhere.
+app.post('/api/builder/parse', (req, res) => {
+  const YAML = require('yaml');
+  const text = String(req.body?.text ?? '');
+  try {
+    const doc = YAML.parseDocument(text);
+    if (doc.errors.length) {
+      const e = doc.errors[0];
+      return res.json({ ok: false, error: e.message.split('\n')[0].replace(/ at line \d+, column \d+:?$/, ''), line: e.linePos?.[0]?.line || null });
+    }
+    const data = doc.toJS() || {};
+    if (typeof data !== 'object' || Array.isArray(data)) return res.json({ ok: false, error: 'Top level must be a mapping (workflows / endpoint_interactions / scenarios).', line: 1 });
+    res.json({ ok: true, doc: data });
+  } catch (err) {
+    res.json({ ok: false, error: err.message.split('\n')[0], line: null });
+  }
+});
+
+app.post('/api/builder/save', (req, res) => {
+  try {
+    const result = testBuilder.saveTestCase(req.body || {});
+    res.status(result.ok ? 201 : result.conflict ? 409 : 400).json(result);
+  } catch (err) {
+    res.status(500).json({ ok: false, errors: [err.message] });
+  }
+});
+
+app.get('/api/builder/files', (req, res) => res.json({ files: testBuilder.listScenarioFiles() }));
+
+// Test-before-save: runs ONE draft scenario through real pytest (real requests, like
+// the Tests tab does) via a throw-away config file that is removed when the run ends.
+app.post('/api/builder/test', (req, res) => {
+  const { scenario, namespace } = req.body || {};
+  if (!namespace) return res.status(400).json({ error: 'namespace is required' });
+  // A test run only needs a flow + a target namespace: the scenario's own name and
+  // supported namespaces are filled in for the throw-away draft when left blank.
+  const sc = { ...scenario, name: (scenario?.name || '').trim() || 'dashboard-test', supportedNamespaces: [namespace] };
+  const draft = testBuilder.createDraft({ scenarios: [sc] });
+  if (!draft.ok) return res.status(400).json({ error: draft.errors.join(' ') });
+  try {
+    const run = runManager.start({ env: 'dev', namespace, labels: [draft.uuid], exclusionLabels: ['eid'], pods: [], onFinish: draft.cleanup });
+    res.status(201).json({ run });
+  } catch (err) {
+    draft.cleanup();
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---- explorer: existing scenario files as structured data, edited in place ----
+const wrap = (fn) => async (req, res) => {
+  try {
+    res.json(await fn(req));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+};
+app.get('/api/explorer/tree', wrap(() => ({ files: explorer.tree() })));
+app.get('/api/explorer/file', wrap((req) => explorer.readFile(String(req.query.path || ''))));
+app.post('/api/explorer/preview', wrap((req) => explorer.preview(req.body || {})));
+app.post('/api/explorer/save', wrap((req) => explorer.save(req.body || {})));
+
+// ---- git (the integration-tests repo) ----
+const runActive = () => runManager.list().some((r) => r.status === 'running' || r.status === 'starting');
+const guardRun = (what) => {
+  if (runActive()) throw new Error(`A test run is in progress - wait for it to finish before ${what} (it would change the files pytest is using).`);
+};
+app.get('/api/git/status', wrap(() => gitApi.status()));
+app.get('/api/git/branches', wrap(() => gitApi.branches()));
+app.get('/api/git/log', wrap(async (req) => ({ commits: await gitApi.log(req.query.limit) })));
+app.get('/api/git/diff', wrap(async (req) => ({
+  diff: await gitApi.diff(String(req.query.path || ''), { untracked: req.query.untracked === '1' }),
+})));
+app.post('/api/git/checkout', wrap(async (req) => { guardRun('switching branches'); return gitApi.checkout((req.body || {}).branch); }));
+app.post('/api/git/branch', wrap((req) => gitApi.createBranch((req.body || {}).name, (req.body || {}).from)));
+app.post('/api/git/fetch', wrap(async () => ({ output: await gitApi.fetchRemote() })));
+app.post('/api/git/pull', wrap(async (req) => { guardRun('pulling'); return { output: await gitApi.pull((req.body || {}).strategy) }; }));
+app.post('/api/git/stage', wrap(async (req) => { await gitApi.stage((req.body || {}).paths); return gitApi.status(); }));
+app.post('/api/git/unstage', wrap(async (req) => { await gitApi.unstage((req.body || {}).paths); return gitApi.status(); }));
+app.post('/api/git/commit', wrap(async (req) => ({ output: await gitApi.commit((req.body || {}).message, (req.body || {}).paths), status: await gitApi.status() })));
+
+// ---- tracing (Tempo via managed oc port-forward; read-only) ----
+app.get('/api/tracing/status', async (req, res) => res.json(await tempo.status()));
+
+app.get('/api/tracing/trace/:id', async (req, res) => {
+  try {
+    res.json(await tempo.getTrace(req.params.id));
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.get('/api/tracing/grafana', async (req, res) => {
+  try {
+    res.json({ url: await tempo.grafanaTraceUrl(req.query.traceId, Number(req.query.from) || undefined, Number(req.query.to) || undefined) });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// Traces a run produced: exact ids reported by the pytest plugin, each looked up in Tempo,
+// plus (when the run sent none) a time-window list of what the cluster traced meanwhile.
+app.get('/api/runs/:id/traces', async (req, res) => {
+  const info = runManager.traces(req.params.id);
+  if (!info) return res.status(404).json({ error: 'not found' });
+  try {
+    const looked = await Promise.all(
+      info.traces.slice(0, 40).map(async (t) => {
+        try {
+          const tr = await tempo.getTrace(t.traceId);
+          return { ...t, found: tr.found, summary: tr.summary };
+        } catch (err) {
+          return { ...t, found: false, error: err.message };
+        }
+      })
+    );
+    res.json({ ...info, traces: looked });
+  } catch (err) {
+    res.status(502).json({ ...info, error: err.message });
+  }
+});
+
+app.get('/api/runs/:id/trace-window', async (req, res) => {
+  const info = runManager.traces(req.params.id);
+  if (!info) return res.status(404).json({ error: 'not found' });
+  try {
+    res.json({ traces: await tempo.searchWindow(info.startedAt - 5000, (info.endedAt || Date.now()) + 60000, 30) });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// ---- open logs in a local IDE (the server runs on the dev's own machine) ----
+const ideLauncher = require('./ideLauncher');
+app.get('/api/ides', (req, res) => res.json({ ides: ideLauncher.available() }));
+app.post('/api/logs/open', (req, res) => {
+  const { ide, name, content } = req.body || {};
+  if (typeof content !== 'string') return res.status(400).json({ error: 'content is required' });
+  try {
+    res.json(ideLauncher.open({ ide, name, content }));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/builder/validate', async (req, res) => {
+  res.json(await testBuilder.validateWithDryRun(req.body || {}));
+});
+
+app.get('/api/runs', (req, res) => res.json({ runs: runManager.list() }));
+
+app.get('/api/runs/:id', (req, res) => {
+  const run = runManager.get(req.params.id);
+  if (!run) return res.status(404).json({ error: 'not found' });
+  res.json({ run });
+});
+
+app.post('/api/runs', (req, res) => {
+  const { env, namespace, labels, exclusionLabels, pods, ssh } = req.body || {};
+  if (!namespace || !labels || !labels.length) {
+    return res.status(400).json({ error: 'namespace and at least one label are required' });
+  }
+  if (env === 'devtest' && (!ssh || !ssh.host || !ssh.user || !ssh.keyPath)) {
+    return res.status(400).json({ error: 'devtest requires ssh host, user and keyPath' });
+  }
+  if ((pods || []).some((p) => !p.name || !p.namespace)) {
+    return res.status(400).json({ error: 'each pod must have a name and namespace' });
+  }
+  try {
+    const run = runManager.start({
+      env: env === 'devtest' ? 'devtest' : 'dev',
+      namespace,
+      labels,
+      exclusionLabels: exclusionLabels || ['eid'],
+      pods: pods || [],
+      ssh,
+    });
+    res.status(201).json({ run });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/runs/:id/stop', (req, res) => {
+  const ok = runManager.stop(req.params.id);
+  if (!ok) return res.status(404).json({ error: 'not found' });
+  res.json({ ok: true });
+});
+
+// Serve the built client, if present, so a single port does everything.
+const clientDist = path.join(__dirname, '..', 'client', 'dist');
+app.use(express.static(clientDist));
+app.get('*', (req, res, next) => {
+  if (req.path.startsWith('/api')) return next();
+  res.sendFile(path.join(clientDist, 'index.html'), (err) => {
+    if (err) res.status(404).send('Client not built yet. Run: npm run build --prefix client');
+  });
+});
+
+const server = app.listen(PORT, () => {
+  console.log(`[dashboard] listening on http://localhost:${PORT}`);
+  console.log(`[dashboard] test project: ${REPO_ROOT}`);
+});
+
+const wss = new WebSocketServer({ server, path: '/ws' });
+wss.on('connection', (ws) => {
+  let subscribedRunId = null;
+
+  ws.on('message', (raw) => {
+    let msg;
+    try {
+      msg = JSON.parse(raw.toString());
+    } catch (_) {
+      return;
+    }
+    if (msg.type === 'subscribe' && msg.runId) {
+      if (subscribedRunId) subscribers.get(subscribedRunId)?.delete(ws);
+      subscribedRunId = msg.runId;
+      if (!subscribers.has(subscribedRunId)) subscribers.set(subscribedRunId, new Set());
+      subscribers.get(subscribedRunId).add(ws);
+
+      const run = runManager.get(subscribedRunId);
+      if (run) {
+        ws.send(
+          JSON.stringify({
+            type: 'backlog',
+            runId: subscribedRunId,
+            sources: run.sources,
+            status: run.status,
+            exitCode: run.exitCode,
+            flow: run.flow,
+          })
+        );
+      }
+    }
+  });
+
+  ws.on('close', () => {
+    if (subscribedRunId) subscribers.get(subscribedRunId)?.delete(ws);
+  });
+});

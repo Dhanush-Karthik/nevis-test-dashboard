@@ -1,0 +1,34 @@
+{
+  "name": "nevis-test-dashboard",
+  "version": "1.0.0",
+  "description": "Web dashboard for the Nevis integration tests: run scenarios with live logs, browse and edit them visually, trace requests, and commit changes with git.",
+  "license": "UNLICENSED",
+  "private": true,
+  "type": "commonjs",
+  "bin": {
+    "nevis-dashboard": "bin/nevis-dashboard.js"
+  },
+  "files": [
+    "bin",
+    "server",
+    "client/dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node bin/nevis-dashboard.js",
+    "build": "npm --prefix client install --no-audit --no-fund && npm --prefix client run build",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "ws": "^8.18.0",
+    "yaml": "^2.5.1"
+  },
+  "devDependencies": {
+    "playwright": "^1.63.0"
+  }
+}

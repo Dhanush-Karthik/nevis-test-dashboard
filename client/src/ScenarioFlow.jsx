@@ -1,0 +1,196 @@
+import React, { useEffect, useState } from 'react';
+import { LuCheck, LuChevronRight, LuCog, LuPanelLeftClose, LuPanelLeftOpen, LuPlug, LuWorkflow, LuX } from 'react-icons/lu';
+import { LuWaypoints } from 'react-icons/lu';
+import { useTraceLinks } from './tracing.jsx';
+import { EmptyState, IconButton, Sash, Section, StatusDot, usePanelSize, useLocalState } from './ui.jsx';
+
+const OUTCOME_LABEL = { passed: 'Passed', failed: 'Failed', error: 'Error', null: 'Running' };
+const STEP_LABEL = { running: 'Running', done: 'Completed', failed: 'Failed' };
+
+function TestListItem({ test, active, onClick }) {
+  return (
+    <button type="button" className={`flow-test-item ${active ? 'active' : ''}`} onClick={onClick}>
+      <StatusDot status={test.outcome || 'running'} />
+      <div className="flow-test-item-text">
+        <div className="flow-test-name">{test.scenarioName || test.nodeId.slice(0, 60)}</div>
+        <div className="flow-test-sub">{test.steps.length} step{test.steps.length === 1 ? '' : 's'}</div>
+      </div>
+    </button>
+  );
+}
+
+function StatusIcon({ status }) {
+  if (status === 'failed') return <span className="flow-icon flow-icon-failed"><LuX size={13} strokeWidth={3} /></span>;
+  if (status === 'running') return <span className="flow-icon flow-icon-running" />;
+  return <span className="flow-icon flow-icon-done"><LuCheck size={13} strokeWidth={3} /></span>;
+}
+
+function JobCard({ step, selected, onClick }) {
+  return (
+    <button type="button" className={`flow-card status-${step.status} ${selected ? 'selected' : ''}`} onClick={() => onClick(step)}>
+      <StatusIcon status={step.status} />
+      <div className="flow-card-body">
+        <div className="flow-card-title">{step.name}</div>
+        <div className="flow-card-sub">{step.type === 'workflow' ? 'Workflow' : 'Endpoint interaction'}</div>
+      </div>
+      {step.actions.length > 0 && <span className="flow-card-badge">{step.actions.length}</span>}
+    </button>
+  );
+}
+
+function JobPipeline({ steps, selectedStepId, onSelectStep }) {
+  return (
+    <div className="flow-diagram">
+      {steps.map((step, i) => (
+        <React.Fragment key={step.id}>
+          <JobCard step={step} selected={selectedStepId === step.id} onClick={onSelectStep} />
+          {i < steps.length - 1 && <div className={`flow-connector ${step.status !== 'running' ? 'done' : ''}`} />}
+        </React.Fragment>
+      ))}
+    </div>
+  );
+}
+
+function ActionRow({ action, pytestEntries }) {
+  const [open, setOpen] = useState(false);
+  // An action owns the pytest lines from its "Handling action" line up to the
+  // next action/step boundary; endSeq is null while it's still the live one.
+  const lines = open
+    ? pytestEntries.filter((e) => e.seq >= action.startSeq && (action.endSeq === null || e.seq <= action.endSeq))
+    : [];
+  return (
+    <div className={`flow-action ${open ? 'open' : ''}`}>
+      <button type="button" className="flow-action-row" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+        <LuChevronRight size={14} className="flow-action-chevron" />
+        <span className="log-ts">{new Date(action.ts).toLocaleTimeString()}</span>
+        <span className="flow-action-name">{action.name}</span>
+      </button>
+      {open && (
+        <div className="flow-action-logs log-surface">
+          {lines.map((e) => (
+            <div key={e.seq} className="flow-action-log-line">{e.line}</div>
+          ))}
+          {lines.length === 0 && <div className="list-hint">No pytest lines captured for this action.</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StepDetails({ step, pytestEntries, onClose }) {
+  const links = useTraceLinks();
+  const traceId = links?.byStep?.[step.id];
+  const Icon = step.type === 'workflow' ? LuCog : LuPlug;
+  return (
+    <div className="card flow-details">
+      <div className="card-head">
+        <Icon size={15} className="muted" />
+        <span className="card-title">{step.type === 'workflow' ? 'Workflow' : 'Endpoint interaction'} · <strong>{step.name}</strong></span>
+        <span className={`status-chip s-${step.status}`}>{STEP_LABEL[step.status] || step.status}</span>
+        <span className="spacer" />
+        {traceId && (
+          <button type="button" className="btn sm" onClick={() => links.open(traceId, null)} title="Show this step's distributed trace">
+            <LuWaypoints size={13} /> View trace
+          </button>
+        )}
+        <IconButton size="sm" icon={<LuX size={15} />} title="Close details" onClick={onClose} />
+      </div>
+
+      <Section title="Configuration" defaultOpen={false} flush storageKey="flow.sec.config">
+        {step.config ? (
+          <table className="kv-table">
+            <tbody>
+              {Object.entries(step.config)
+                .filter(([k]) => k !== 'name')
+                .map(([k, v]) => (
+                  <tr key={k}>
+                    <td className="kv-key">{k}</td>
+                    <td className="kv-val">{v}</td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        ) : (
+          <div className="list-hint">No final config yet — this step may still be running.</div>
+        )}
+      </Section>
+
+      {step.actions.length > 0 && (
+        <Section title="Actions" badge={step.actions.length} flush storageKey="flow.sec.actions">
+          <div className="flow-actions-list">
+            {step.actions.map((a, i) => (
+              <ActionRow key={i} action={a} pytestEntries={pytestEntries} />
+            ))}
+          </div>
+        </Section>
+      )}
+    </div>
+  );
+}
+
+export default function ScenarioFlow({ tests, pytestEntries = [] }) {
+  const [selectedTestId, setSelectedTestId] = useState(null);
+  const [selectedStepId, setSelectedStepId] = useState(null);
+  const [listOpen, setListOpen] = useLocalState('flow.listOpen', true);
+  const [listW, setListW, resetListW] = usePanelSize('flow.list', 250, 180, 520);
+
+  useEffect(() => {
+    if (!tests.length) return;
+    if (!selectedTestId || !tests.some((t) => t.id === selectedTestId)) {
+      // Default to the currently-running test, else the most recent one.
+      const running = [...tests].reverse().find((t) => t.outcome === null);
+      setSelectedTestId((running || tests[tests.length - 1]).id);
+    }
+  }, [tests, selectedTestId]);
+
+  const selectedTest = tests.find((t) => t.id === selectedTestId);
+  // Re-derived from the live `tests` prop every render, so status/config/actions
+  // update in place instead of freezing at the moment the node was clicked.
+  const selectedStep = selectedTest?.steps.find((s) => s.id === selectedStepId) || null;
+
+  if (!tests.length) {
+    return <EmptyState icon={<LuWorkflow size={26} />} title="No scenario activity yet">Steps appear here as pytest reports them.</EmptyState>;
+  }
+
+  return (
+    <div className="flow-layout">
+      {listOpen && (
+        <div className="flow-test-list" style={{ width: listW }}>
+          <div className="panel-head slim">
+            <span className="panel-title">Scenarios <em className="count">{tests.length}</em></span>
+            <IconButton size="sm" icon={<LuPanelLeftClose size={15} />} title="Hide scenario list" onClick={() => setListOpen(false)} />
+          </div>
+          <div className="panel-scroll tight">
+            {tests.map((t) => (
+              <TestListItem key={t.id} test={t} active={t.id === selectedTestId} onClick={() => { setSelectedTestId(t.id); setSelectedStepId(null); }} />
+            ))}
+          </div>
+          <Sash edge="end" size={listW} onSize={setListW} onReset={resetListW} />
+        </div>
+      )}
+
+      <div className="flow-main">
+        {selectedTest && (
+          <>
+            <div className="flow-scenario-header">
+              {!listOpen && <IconButton size="sm" icon={<LuPanelLeftOpen size={15} />} title="Show scenario list" onClick={() => setListOpen(true)} />}
+              <div className="flow-scenario-head-text">
+                <div className="flow-scenario-title">{selectedTest.scenarioName || 'Untitled scenario'}</div>
+                {selectedTest.description && <div className="flow-scenario-desc">{selectedTest.description}</div>}
+              </div>
+              <span className={`status-chip s-${selectedTest.outcome || 'running'}`}>{OUTCOME_LABEL[selectedTest.outcome] || 'Running'}</span>
+            </div>
+
+            {selectedTest.steps.length === 0 ? (
+              <div className="list-hint pad">No workflow or endpoint steps parsed yet.</div>
+            ) : (
+              <JobPipeline steps={selectedTest.steps} selectedStepId={selectedStepId} onSelectStep={(s) => setSelectedStepId(s.id)} />
+            )}
+
+            {selectedStep && <StepDetails step={selectedStep} pytestEntries={pytestEntries} onClose={() => setSelectedStepId(null)} />}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
