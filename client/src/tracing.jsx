@@ -127,6 +127,21 @@ export function useRunTraces(runId, status) {
     if (runId) load();
   }, [runId, load]);
 
+  // The suite reports its trace ids as tests finish, so when the run ends always look once more:
+  // the last poll may have happened before the final ids were logged.
+  const wasRunning = useRef(false);
+  useEffect(() => {
+    wasRunning.current = false;
+  }, [runId]);
+  useEffect(() => {
+    if (running) wasRunning.current = true;
+    else if (wasRunning.current && runId) {
+      wasRunning.current = false;
+      attempts.current = 0;
+      load();
+    }
+  }, [running, runId, load]);
+
   // While running: refresh as new requests appear. After the run: keep retrying for a
   // while, because Tempo needs a few seconds to ingest what the components just exported.
   const pending = state.traces.some((t) => !t.found);

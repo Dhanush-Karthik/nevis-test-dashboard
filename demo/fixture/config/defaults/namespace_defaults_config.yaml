@@ -1,6 +1,0 @@
-dev-main:
-  idp_host: idp.dev-main.example.test
-  reset_email: true
-dev-pkv:
-  idp_host: idp.dev-pkv.example.test
-  reset_email: true

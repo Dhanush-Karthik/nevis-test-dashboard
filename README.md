@@ -4,6 +4,20 @@ Grafana-style web UI for running the nevis integration tests and watching pod
 + pytest logs live. Standalone tool that
 talks to `oc`/`ssh` and `pytest` directly.
 
+## Demo
+
+[![Watch the demo video](docs/media/poster.png)](docs/media/nevis-dashboard-demo.mp4)
+
+**[Watch the 5-minute walkthrough](docs/media/nevis-dashboard-demo.mp4)** (narrated, MP4).
+
+| | |
+|---|---|
+| ![Explorer](docs/media/01-explorer-board.png)<br>**Explorer**: existing scenarios as a visual flow, edited in place | ![YAML editor](docs/media/02-yaml-editor.png)<br>**YAML editor**: edit the config directly, synced with the board |
+| ![Save diff](docs/media/03-save-diff.png)<br>**Save changes**: the exact YAML diff before anything is written | ![Create test](docs/media/04-create-test.png)<br>**Create new test**: build a scenario from blocks |
+| ![Run tests](docs/media/05-run-tests-pod-logs.png)<br>**Run tests**: trigger a scenario by label, tail pod logs live | ![Failed flow](docs/media/06-scenario-flow-failed.png)<br>**Scenario flow**: the failing step, marked where it stopped |
+| ![Trace graph](docs/media/07-trace-graph.png)<br>**Tracing**: service graph for every workflow | ![Error span](docs/media/08-trace-error-span.png)<br>**Tracing**: the failing span, its status and exception |
+| ![Deployments](docs/media/09-deployments.png)<br>**Deployments**: pods, services and secret keys per namespace | ![Git](docs/media/10-git-diff.png)<br>**Git**: real YAML diffs, branch and commit |
+
 ## Requirements
 
 - Node 18+ (20 recommended) and git.
@@ -129,3 +143,4 @@ The integration-tests repo from the dashboard: current branch and ahead/behind, 
 tracking branch), create a branch, fetch, pull (fast-forward only by default; rebase/merge selectable), the changed files with
 the real unified diff against HEAD, and commit exactly the ticked files. Nothing is pushed. Checkout and pull are refused
 while a test run is in progress.
+
