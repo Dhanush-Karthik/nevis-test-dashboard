@@ -1,6 +1,6 @@
 {
   "name": "nevis-test-dashboard",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Web dashboard for the Nevis integration tests: run scenarios with live logs, browse and edit them visually, trace requests, and commit changes with git.",
   "license": "UNLICENSED",
   "private": true,

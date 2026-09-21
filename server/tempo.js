@@ -105,12 +105,35 @@ function summarize(spans) {
 
 const cleanId = (id) => String(id || '').replace(/-/g, '').toLowerCase();
 
+// Traces fetched recently, kept so the global search can find their spans by id or name without another Tempo call.
+const traceCache = new Map();
+const CACHE_MAX = 40;
+function remember(trace) {
+  traceCache.delete(trace.traceId);
+  traceCache.set(trace.traceId, trace);
+  while (traceCache.size > CACHE_MAX) traceCache.delete(traceCache.keys().next().value);
+}
+function cachedSpanMatches(q, limit = 20) {
+  const out = [];
+  for (const t of traceCache.values()) {
+    for (const s of t.spans) {
+      if (s.spanId.includes(q) || (s.parentId && s.parentId.includes(q)) || (s.name || '').toLowerCase().includes(q)) {
+        out.push({ traceId: t.traceId, spanId: s.spanId, parentId: s.parentId, name: s.name, service: s.service, error: s.error, durUs: s.durUs });
+        if (out.length >= limit) return out;
+      }
+    }
+  }
+  return out;
+}
+
 async function getTrace(id) {
   const traceId = cleanId(id);
   if (!/^[0-9a-f]{1,32}$/.test(traceId)) throw new Error('trace id must be hex (or a uuid)');
   const r = await tempoGet(`/api/traces/${traceId}`);
   if (r.notFound) return { traceId, found: false, spans: [], summary: normalizeTrace({}, traceId).summary };
-  return { found: true, ...normalizeTrace(r.data, traceId) };
+  const full = { found: true, ...normalizeTrace(r.data, traceId) };
+  remember(full);
+  return full;
 }
 
 // Time-window fallback: recent traces (any service) between two epoch-ms bounds.
@@ -145,4 +168,4 @@ async function grafanaTraceUrl(traceId, fromMs, toMs) {
   return `${base}/explore?orgId=1&left=${encodeURIComponent(JSON.stringify(left))}`;
 }
 
-module.exports = { getTrace, searchWindow, status, grafanaTraceUrl, cleanId };
+module.exports = { cachedSpanMatches, getTrace, searchWindow, status, grafanaTraceUrl, cleanId };

@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { LuFlaskConical, LuFolderTree, LuGitBranch, LuBoxes, LuSquarePen, LuTerminal, LuWaypoints, LuWorkflow, LuSettings, LuLoader } from 'react-icons/lu';
+import { LuFlaskConical, LuFolderTree, LuGitBranch, LuBoxes, LuTerminal, LuWaypoints, LuWorkflow, LuSettings, LuHistory, LuLoader } from 'react-icons/lu';
 import { api, wsUrl } from './api.js';
 import TestsView from './TestsView.jsx';
 import DeploymentsView from './DeploymentsView.jsx';
 import CreateTestView from './CreateTestView.jsx';
 import GitView from './GitView.jsx';
 import SettingsView from './SettingsView.jsx';
+import HistoryView from './HistoryView.jsx';
 import LogPanel from './LogPanel.jsx';
 import ScenarioFlow from './ScenarioFlow.jsx';
 import OcSessionHost from './OcSession.jsx';
@@ -16,7 +17,7 @@ import { EmptyState, Segmented, StatusDot, ToastProvider } from './ui.jsx';
 export const SECTIONS = {
   explorer: { label: 'Explorer', icon: LuFolderTree, render: () => <CreateTestView active mode="explore" /> },
   tests: { label: 'Run tests', icon: LuFlaskConical, render: () => <TestsView /> },
-  create: { label: 'Create new test', icon: LuSquarePen, render: () => <CreateTestView active mode="create" /> },
+  history: { label: 'History', icon: LuHistory, render: () => <HistoryView active /> },
   git: { label: 'Git', icon: LuGitBranch, render: () => <GitView active /> },
   deployments: { label: 'Deployments', icon: LuBoxes, render: () => <DeploymentsView /> },
   settings: { label: 'Settings', icon: LuSettings, render: () => <SettingsView active /> },
@@ -61,12 +62,12 @@ function useRunStream(runId) {
   return { run, sources, flow, error };
 }
 
-function RunPopout({ runId, initialView, source, only }) {
+export function RunPopout({ runId, initialView, initialFocus = null, source, only, embedded = false }) {
   const { run, sources, flow, error } = useRunStream(runId);
   const [view, setView] = useState(initialView || 'logs');
   const [tab, setTab] = useState(source || 'pytest');
   const [sheet, setSheet] = useState(null);
-  const [focus, setFocus] = useState(null);
+  const [focus, setFocus] = useState(initialFocus);
   const runTraces = useRunTraces(run?.id, run?.status);
   const links = useMemo(() => {
     const known = new Set();
@@ -79,8 +80,9 @@ function RunPopout({ runId, initialView, source, only }) {
   }, [runTraces.traces]);
 
   useEffect(() => {
+    if (embedded) return;
     document.title = `${only && source ? source : 'Run'} · ${runId.slice(0, 8)} — Nevis Test Dashboard`;
-  }, [runId, only, source]);
+  }, [runId, only, source, embedded]);
 
   if (error) return <EmptyState icon={<LuTerminal size={26} />} title="Could not open this run">{error}</EmptyState>;
   if (!run) return <EmptyState icon={<LuLoader size={24} className="spin" />} title="Connecting to the run…" />;

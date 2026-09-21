@@ -93,6 +93,7 @@ class ScenarioFlowTracker {
             origin: 'logs',
             source: t.source,
             errors: t.errors,
+            inbound: !!t.inbound,
             warns: t.warns,
             lines: t.count,
             sample: t.sample,

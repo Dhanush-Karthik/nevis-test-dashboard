@@ -215,15 +215,18 @@ app.get('/api/builder/files', (req, res) => res.json({ files: testBuilder.listSc
 // Test-before-save: runs ONE draft scenario through real pytest (real requests, like
 // the Tests tab does) via a throw-away config file that is removed when the run ends.
 app.post('/api/builder/test', (req, res) => {
-  const { scenario, namespace } = req.body || {};
+  const { scenario, namespace, pods } = req.body || {};
   if (!namespace) return res.status(400).json({ error: 'namespace is required' });
+  const podList = Array.isArray(pods) ? pods : [];
+  if (podList.some((p) => !p || !/^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/.test(p.name || '') || !/^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/.test(p.namespace || ''))) return res.status(400).json({ error: 'each pod needs a valid name and namespace' });
   // A test run only needs a flow + a target namespace: the scenario's own name and
   // supported namespaces are filled in for the throw-away draft when left blank.
+  if (runActive()) return res.status(409).json({ error: 'A test is already running. Only one scenario runs at a time: wait for it to finish or stop it first.' });
   const sc = { ...scenario, name: (scenario?.name || '').trim() || 'dashboard-test', supportedNamespaces: [namespace] };
   const draft = testBuilder.createDraft({ scenarios: [sc] });
   if (!draft.ok) return res.status(400).json({ error: draft.errors.join(' ') });
   try {
-    const run = runManager.start({ env: 'dev', namespace, labels: [draft.uuid], exclusionLabels: ['eid'], pods: [], onFinish: draft.cleanup });
+    const run = runManager.start({ env: 'dev', namespace, labels: [draft.uuid], exclusionLabels: ['eid'], pods: podList, kind: 'scenario-test', title: sc.name, onFinish: draft.cleanup });
     res.status(201).json({ run });
   } catch (err) {
     draft.cleanup();
@@ -239,7 +242,13 @@ const wrap = (fn) => async (req, res) => {
     res.status(400).json({ error: err.message });
   }
 };
-app.get('/api/explorer/tree', wrap(() => ({ files: explorer.tree() })));
+app.get('/api/explorer/tree', wrap(() => ({ files: explorer.tree(), ...explorer.scenarioDirs() })));
+app.post('/api/explorer/folder', wrap((req) => explorer.createFolder(req.body || {})));
+app.post('/api/explorer/copy', wrap((req) => explorer.copyFile(req.body || {})));
+app.post('/api/explorer/rename', wrap((req) => { guardRun('renaming files'); return explorer.renameFile(req.body || {}); }));
+app.post('/api/explorer/delete', wrap((req) => { guardRun('deleting files'); return explorer.deleteEntry(req.body || {}); }));
+app.post('/api/explorer/create', wrap((req) => explorer.createFile(req.body || {})));
+app.post('/api/explorer/move', wrap((req) => { guardRun('moving files'); return explorer.moveFile(req.body || {}); }));
 app.get('/api/explorer/file', wrap((req) => explorer.readFile(String(req.query.path || ''))));
 app.post('/api/explorer/preview', wrap((req) => explorer.preview(req.body || {})));
 app.post('/api/explorer/save', wrap((req) => explorer.save(req.body || {})));
@@ -342,6 +351,7 @@ app.get('/api/runs/:id', (req, res) => {
 
 app.post('/api/runs', (req, res) => {
   const { env, namespace, labels, exclusionLabels, pods, ssh } = req.body || {};
+  if (runActive()) return res.status(409).json({ error: 'A test is already running. Only one run at a time: wait for it to finish or stop it first.' });
   if (!namespace || !labels || !labels.length) {
     return res.status(400).json({ error: 'namespace and at least one label are required' });
   }
@@ -366,6 +376,14 @@ app.post('/api/runs', (req, res) => {
   }
 });
 
+app.delete('/api/runs/:id', (req, res) => {
+  const r = runManager.remove(req.params.id);
+  if (r === null) return res.status(404).json({ error: 'not found' });
+  if (r === false) return res.status(409).json({ error: 'Stop the run before removing it.' });
+  res.json({ ok: true });
+});
+app.post('/api/runs/clear', (req, res) => res.json({ removed: runManager.clearFinished() }));
+
 app.post('/api/runs/:id/stop', (req, res) => {
   const ok = runManager.stop(req.params.id);
   if (!ok) return res.status(404).json({ error: 'not found' });
@@ -373,6 +391,10 @@ app.post('/api/runs/:id/stop', (req, res) => {
 });
 
 // Serve the built client, if present, so a single port does everything.
+// ---- global search (files, scenarios, labels, blocks, defaults, env names, runs, traces, git) ----
+const globalSearch = require('./search');
+app.get('/api/search', wrap((req) => globalSearch.search(req.query.q, runManager)));
+
 // ---- OpenShift session (log in again from the dashboard when the 24h login has expired) ----
 app.get('/api/oc/session', wrap(() => ocLogin.session()));
 app.post('/api/oc/login', wrap((req) => ocLogin.login(req.body || {})));

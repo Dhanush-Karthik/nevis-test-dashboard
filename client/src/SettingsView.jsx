@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { LuKeyRound, LuSettings, LuSlidersHorizontal } from 'react-icons/lu';
 import DefaultsView from './DefaultsView.jsx';
 import EnvView from './EnvView.jsx';
@@ -9,6 +9,11 @@ import { Segmented, useLocalState } from './ui.jsx';
 export default function SettingsView({ active = true }) {
   const [tab, setTab] = useLocalState('settings.tab', 'defaults');
   const current = tab === 'env' ? 'env' : 'defaults';
+  useEffect(() => {
+    const onNav = (e) => { const n = e.detail || {}; if (n.section === 'settings' && n.tab) setTab(n.tab); };
+    window.addEventListener('nevis-nav', onNav);
+    return () => window.removeEventListener('nevis-nav', onNav);
+  }, [setTab]);
   return (
     <div className="view col">
       <div className="tabstrip">

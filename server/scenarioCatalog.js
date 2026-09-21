@@ -98,4 +98,4 @@ function resolve(labelsInput, exclusionLabels = []) {
   return { scenarios: matched, namespaces };
 }
 
-module.exports = { loadAllScenarios, allLabels, resolve, findConfigFiles, DRAFT_PREFIX };
+module.exports = { SEARCH_DIRS, loadAllScenarios, allLabels, resolve, findConfigFiles, DRAFT_PREFIX };

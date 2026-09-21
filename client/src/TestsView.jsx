@@ -284,6 +284,18 @@ export default function TestsView() {
     connectWs(run.id, run.sources, run.flow);
   };
 
+  // After a page refresh, pick the last viewed run back up (the server keeps runs until it restarts).
+  useEffect(() => {
+    let id = null;
+    try { id = localStorage.getItem('nevis.tests.currentRun'); } catch (_) { /* storage unavailable */ }
+    if (id) api.run(id).then(() => openHistoricalRun(id)).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(() => {
+    if (!currentRun?.id) return;
+    try { localStorage.setItem('nevis.tests.currentRun', currentRun.id); } catch (_) { /* storage unavailable */ }
+  }, [currentRun?.id]);
+
   const tabNames = Object.keys(sources);
   const allEntries = tabNames
     .flatMap((name) => sources[name])
@@ -431,13 +443,6 @@ export default function TestsView() {
             </Section>
           </div>
 
-          <div className="panel-foot">
-            {startError && <div className="text-danger small"><LuCircleAlert size={13} /> {startError}</div>}
-            <button type="button" className="btn primary block lg" onClick={startRun} disabled={!canRun}>
-              {starting ? <LuLoader size={15} className="spin" /> : <LuPlay size={15} />}
-              <span>{starting ? 'Starting…' : 'Run tests'}</span>
-            </button>
-          </div>
           <Sash edge="end" size={sideW} onSize={setSideW} onReset={resetSideW} />
         </aside>
       )}
@@ -483,12 +488,18 @@ export default function TestsView() {
               ]}
             />
           )}
-          {running && (
-            <button type="button" className="btn sm danger" onClick={stopRun}>
-              <LuSquare size={12} /> Stop
+          {running ? (
+            <button type="button" className="btn danger" onClick={stopRun}>
+              <LuSquare size={13} /> Stop
+            </button>
+          ) : (
+            <button type="button" className="btn primary" onClick={startRun} disabled={!canRun} title={canRun ? 'Run the matching scenarios through pytest' : 'Enter labels and pick a test namespace first'}>
+              {starting ? <LuLoader size={14} className="spin" /> : <LuPlay size={14} />}
+              <span>{starting ? 'Starting…' : 'Run tests'}</span>
             </button>
           )}
         </div>
+        {startError && <div className="notice danger banner"><LuCircleAlert size={15} /><div>{startError}</div></div>}
 
         <TraceLinkContext.Provider value={traceLinks}>
         {mainView === 'traces' ? (

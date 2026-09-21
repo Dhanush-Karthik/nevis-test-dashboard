@@ -273,6 +273,7 @@ export default function DeploymentsView() {
       .then(([d, s, p, se]) => {
         if (cancelled) return;
         setResources({ deployments: d.deployments, services: s.services, pods: p.pods, secrets: se.secrets });
+        window.__nevisCluster = { namespace: activeNamespace, deployments: d.deployments, services: s.services, pods: p.pods, secrets: se.secrets }; // for the global search
       })
       .catch((err) => !cancelled && setError(err.message))
       .finally(() => !cancelled && setLoading(false));
