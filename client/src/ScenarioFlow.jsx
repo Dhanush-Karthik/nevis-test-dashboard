@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { LuCheck, LuChevronRight, LuCog, LuPanelLeftClose, LuPanelLeftOpen, LuPlug, LuWorkflow, LuX } from 'react-icons/lu';
 import { LuWaypoints } from 'react-icons/lu';
 import { useTraceLinks } from './tracing.jsx';
 import { EmptyState, IconButton, Sash, Section, StatusDot, usePanelSize, useLocalState } from './ui.jsx';
 
 const OUTCOME_LABEL = { passed: 'Passed', failed: 'Failed', error: 'Error', null: 'Running' };
+const CLOSED = '__closed__'; // details panel closed on purpose: stop auto-following
 const STEP_LABEL = { running: 'Running', done: 'Completed', failed: 'Failed' };
 
 function TestListItem({ test, active, onClick }) {
@@ -51,22 +52,42 @@ function JobPipeline({ steps, selectedStepId, onSelectStep }) {
   );
 }
 
-function ActionRow({ action, pytestEntries }) {
-  const [open, setOpen] = useState(false);
+// `auto`: the row should be open on its own (it is the live action, or the one a failed step stopped
+// at). A manual toggle wins until `auto` changes, e.g. when the next action starts.
+function ActionRow({ action, pytestEntries, auto }) {
+  const [manual, setManual] = useState(null);
+  useEffect(() => setManual(null), [auto]);
+  const open = manual ?? auto;
+  const setOpen = (fn) => setManual(fn(open));
+  const rowRef = useRef(null);
+  const logRef = useRef(null);
+  const stick = useRef(true); // follow the tail unless the user scrolled up
   // An action owns the pytest lines from its "Handling action" line up to the
   // next action/step boundary; endSeq is null while it's still the live one.
   const lines = open
     ? pytestEntries.filter((e) => e.seq >= action.startSeq && (action.endSeq === null || e.seq <= action.endSeq))
     : [];
+  // the live action: bring it into view, and keep its newest lines in view as they stream in
+  useEffect(() => {
+    if (auto) rowRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [auto]);
+  useEffect(() => {
+    const el = logRef.current;
+    if (auto && open && el && stick.current) el.scrollTop = el.scrollHeight;
+  }, [auto, open, lines.length]);
   return (
-    <div className={`flow-action ${open ? 'open' : ''}`}>
+    <div ref={rowRef} className={`flow-action ${open ? 'open' : ''}`}>
       <button type="button" className="flow-action-row" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
         <LuChevronRight size={14} className="flow-action-chevron" />
         <span className="log-ts">{new Date(action.ts).toLocaleTimeString()}</span>
         <span className="flow-action-name">{action.name}</span>
       </button>
       {open && (
-        <div className="flow-action-logs log-surface">
+        <div
+          ref={logRef}
+          className="flow-action-logs log-surface"
+          onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24; }}
+        >
           {lines.map((e) => (
             <div key={e.seq} className="flow-action-log-line">{e.line}</div>
           ))}
@@ -116,10 +137,10 @@ function StepDetails({ step, pytestEntries, onClose }) {
       </Section>
 
       {step.actions.length > 0 && (
-        <Section title="Actions" badge={step.actions.length} flush storageKey="flow.sec.actions">
+        <Section title="Actions" badge={step.actions.length} flush>
           <div className="flow-actions-list">
             {step.actions.map((a, i) => (
-              <ActionRow key={i} action={a} pytestEntries={pytestEntries} />
+              <ActionRow key={i} action={a} pytestEntries={pytestEntries} auto={step.status !== 'done' && i === step.actions.length - 1} />
             ))}
           </div>
         </Section>
@@ -129,24 +150,20 @@ function StepDetails({ step, pytestEntries, onClose }) {
 }
 
 export default function ScenarioFlow({ tests, pytestEntries = [] }) {
-  const [selectedTestId, setSelectedTestId] = useState(null);
+  const [selectedTestId, setSelectedTestId] = useState(null); // null = follow the latest scenario
   const [selectedStepId, setSelectedStepId] = useState(null);
   const [listOpen, setListOpen] = useLocalState('flow.listOpen', true);
   const [listW, setListW, resetListW] = usePanelSize('flow.list', 250, 180, 520);
 
-  useEffect(() => {
-    if (!tests.length) return;
-    if (!selectedTestId || !tests.some((t) => t.id === selectedTestId)) {
-      // Default to the currently-running test, else the most recent one.
-      const running = [...tests].reverse().find((t) => t.outcome === null);
-      setSelectedTestId((running || tests[tests.length - 1]).id);
-    }
-  }, [tests, selectedTestId]);
-
-  const selectedTest = tests.find((t) => t.id === selectedTestId);
+  // Until the user picks a scenario, follow the latest: the running one, else the most recent.
+  const autoTest = tests.length ? [...tests].reverse().find((t) => t.outcome === null) || tests[tests.length - 1] : null;
+  const selectedTest = tests.find((t) => t.id === selectedTestId) || autoTest;
   // Re-derived from the live `tests` prop every render, so status/config/actions
   // update in place instead of freezing at the moment the node was clicked.
-  const selectedStep = selectedTest?.steps.find((s) => s.id === selectedStepId) || null;
+  // Until the user picks a card, follow the live one: the running step, else the last one (the failed
+  // step of a failed test), so its actions are visible without an extra click.
+  const autoStep = selectedTest ? selectedTest.steps.find((s) => s.status === 'running') || selectedTest.steps[selectedTest.steps.length - 1] || null : null;
+  const selectedStep = selectedTest?.steps.find((s) => s.id === selectedStepId) || (selectedStepId === CLOSED ? null : autoStep);
 
   if (!tests.length) {
     return <EmptyState icon={<LuWorkflow size={26} />} title="No scenario activity yet">Steps appear here as pytest reports them.</EmptyState>;
@@ -162,7 +179,7 @@ export default function ScenarioFlow({ tests, pytestEntries = [] }) {
           </div>
           <div className="panel-scroll tight">
             {tests.map((t) => (
-              <TestListItem key={t.id} test={t} active={t.id === selectedTestId} onClick={() => { setSelectedTestId(t.id); setSelectedStepId(null); }} />
+              <TestListItem key={t.id} test={t} active={t.id === selectedTest?.id} onClick={() => { setSelectedTestId(t.id); setSelectedStepId(null); }} />
             ))}
           </div>
           <Sash edge="end" size={listW} onSize={setListW} onReset={resetListW} />
@@ -184,10 +201,10 @@ export default function ScenarioFlow({ tests, pytestEntries = [] }) {
             {selectedTest.steps.length === 0 ? (
               <div className="list-hint pad">No workflow or endpoint steps parsed yet.</div>
             ) : (
-              <JobPipeline steps={selectedTest.steps} selectedStepId={selectedStepId} onSelectStep={(s) => setSelectedStepId(s.id)} />
+              <JobPipeline steps={selectedTest.steps} selectedStepId={selectedStep?.id ?? null} onSelectStep={(s) => setSelectedStepId(s.id)} />
             )}
 
-            {selectedStep && <StepDetails step={selectedStep} pytestEntries={pytestEntries} onClose={() => setSelectedStepId(null)} />}
+            {selectedStep && <StepDetails key={selectedStep.id} step={selectedStep} pytestEntries={pytestEntries} onClose={() => setSelectedStepId(CLOSED)} />}
           </>
         )}
       </div>

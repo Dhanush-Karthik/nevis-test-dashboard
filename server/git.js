@@ -135,13 +135,14 @@ async function pull(strategy = 'ff-only') {
 }
 
 // Unified diff of one file against HEAD, or (untracked) the whole file as additions.
-async function diff(p, { untracked = false } = {}) {
+async function diff(p, { untracked = false, staged = false } = {}) {
   assertPaths([p]);
   if (untracked) {
     const r = await run(['diff', '--no-color', '--no-index', '--', os.devNull, p], { okCodes: [0, 1] });
     return r.stdout;
   }
-  const r = await run(['diff', '--no-color', 'HEAD', '--', p]); // staged + unstaged, versus the last commit
+  // staged: what would be committed (index vs HEAD); otherwise the working copy against the index
+  const r = await run(staged ? ['diff', '--no-color', '--cached', '--', p] : ['diff', '--no-color', '--', p]);
   return r.stdout;
 }
 
@@ -170,13 +171,28 @@ async function unstage(paths) {
   await run(['restore', '--staged', '--', ...assertPaths(paths)]);
 }
 
-// Commits exactly the given files (whatever else is staged is left out).
-async function commit(message, paths) {
+// Commits what is staged, and nothing else: the developer chooses the files by staging them.
+async function commit(message) {
   if (!message || !message.trim()) throw new Error('commit message is required');
-  assertPaths(paths);
-  await run(['add', '--', ...paths]);
-  const r = await run(['commit', '-F', '-', '--', ...paths], { input: `${message.trim()}\n` });
+  const staged = await run(['diff', '--cached', '--quiet'], { okCodes: [0, 1] });
+  if (staged.code === 0) throw new Error('Nothing is staged. Stage the files you want to commit first.');
+  const r = await run(['commit', '-F', '-'], { input: `${message.trim()}\n` });
   return r.stdout.trim();
 }
 
-module.exports = { status, branches, log, checkout, createBranch, fetchRemote, pull, diff, diffTexts, stage, unstage, commit, REPO_ROOT };
+// Pushes the current branch to origin (first push of a new branch sets its upstream). Never forces.
+async function push() {
+  const st = await status();
+  if (st.detached) throw new Error('You are on a detached HEAD; switch to a branch before pushing.');
+  const args = st.upstream ? ['push'] : ['push', '--set-upstream', 'origin', st.branch];
+  const r = await run(args);
+  return (r.stdout + r.stderr).trim() || 'Pushed';
+}
+
+async function isIgnored(p) {
+  assertPaths([p]);
+  const r = await run(['check-ignore', '-q', '--', p], { okCodes: [0, 1] });
+  return r.code === 0;
+}
+
+module.exports = { status, branches, log, checkout, createBranch, fetchRemote, pull, push, diff, diffTexts, stage, unstage, commit, isIgnored, REPO_ROOT };

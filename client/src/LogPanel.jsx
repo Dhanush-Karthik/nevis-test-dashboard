@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { LuArrowDownToLine, LuClock, LuDownload, LuExpand, LuFilter, LuRegex, LuSearch, LuTerminal, LuWrapText, LuX, LuCheck } from 'react-icons/lu';
+import { LuArrowDownToLine, LuClock, LuDownload, LuExpand, LuFilter, LuRegex, LuSearch, LuSquareArrowOutUpRight, LuTerminal, LuWrapText, LuX, LuCheck } from 'react-icons/lu';
 import { api } from './api.js';
 import { linkifyLine, useTraceLinks } from './tracing.jsx';
 import { DateTimeField, EmptyState, IconButton, MenuButton, Modal, Segmented, Select, toLocalValue, useLocalState, useToast } from './ui.jsx';
@@ -67,7 +67,7 @@ function ContextModal({ entry, allEntries, onClose }) {
   );
 }
 
-export default function LogPanel({ title, entries }) {
+export default function LogPanel({ title, entries, onPopout }) {
   const toast = useToast();
   const [search, setSearch] = useState('');
   const [useRegex, setUseRegex] = useState(false);
@@ -182,6 +182,7 @@ export default function LogPanel({ title, entries }) {
         <IconButton size="md" icon={<LuWrapText size={15} />} title="Wrap long lines" active={wrap} onClick={() => setWrap((v) => !v)} />
         <IconButton size="md" icon={<LuArrowDownToLine size={15} />} title="Auto-scroll to newest" active={autoscroll} onClick={() => setAutoscroll((v) => !v)} />
         <IconButton size="md" icon={<LuDownload size={15} />} title="Download as .log file" onClick={download} />
+        {onPopout && <IconButton size="md" icon={<LuSquareArrowOutUpRight size={15} />} title="Open these logs in a separate window (keeps streaming live)" onClick={onPopout} />}
         <MenuButton
           className="btn sm"
           icon={<LuTerminal size={14} />}

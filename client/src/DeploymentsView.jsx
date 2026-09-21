@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { api } from './api.js';
 import { LuBox, LuBoxes, LuCheck, LuCircleAlert, LuCloud, LuEllipsis, LuGlobe, LuHexagon, LuLoader, LuLock, LuMinus, LuPanelLeftClose, LuPanelLeftOpen, LuPlus, LuRefreshCw, LuSearch, LuServer, LuX } from 'react-icons/lu';
+import { useOnOcLogin } from './OcSession.jsx';
 import { EmptyState, IconButton, Sash, Section, Select, Field, usePanelSize, useLocalState } from './ui.jsx';
 
 function relativeAge(iso) {
@@ -225,6 +226,7 @@ export default function DeploymentsView() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [selected, setSelected] = useState(null);
+  const [reloadTick, setReloadTick] = useState(0);
   const [collapsed, setCollapsed] = useState(new Set());
   const [sideOpen, setSideOpen] = useLocalState('deploy.sideOpen', true);
   const [sideW, setSideW, resetSideW] = usePanelSize('deploy.side', 300, 240, () => Math.min(560, window.innerWidth - 420));
@@ -254,6 +256,11 @@ export default function DeploymentsView() {
     }
   };
 
+  useOnOcLogin(() => {
+    fetchNamespaces();
+    setReloadTick((n) => n + 1);
+  });
+
   useEffect(() => {
     if (!activeNamespace) return;
     let cancelled = false;
@@ -273,7 +280,7 @@ export default function DeploymentsView() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeNamespace, env]);
+  }, [activeNamespace, env, reloadTick]);
 
   const tree = useMemo(() => (activeNamespace ? buildTree(activeNamespace, resources) : null), [activeNamespace, resources]);
 

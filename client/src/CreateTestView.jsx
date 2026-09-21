@@ -4,9 +4,10 @@ import ScenarioFlow from './ScenarioFlow.jsx';
 import LogPanel from './LogPanel.jsx';
 import { TracesPanel, TraceSheet, TraceLinkContext, useRunTraces } from './tracing.jsx';
 import FileTree from './FileTree.jsx';
+import { openPopout, setActiveRun, shortcutLabel } from './popout.js';
 import {
   LuChevronDown, LuChevronRight, LuCircleAlert, LuCog, LuLayoutGrid, LuLoader, LuMaximize2, LuMinimize2, LuPanelBottomClose, LuPanelLeftClose,
-  LuPanelLeftOpen, LuPanelRightClose, LuPanelRightOpen, LuPlay, LuPlug, LuPlus, LuRefreshCw, LuSave, LuSearch, LuTrash2, LuX, LuCheck, LuWorkflow, LuBlocks, LuLibrary, LuFolderTree, LuUndo2, LuCode, LuCopy, LuChevronLeft,
+  LuPanelLeftOpen, LuPanelRightClose, LuPanelRightOpen, LuPlay, LuPlug, LuPlus, LuRefreshCw, LuSave, LuSearch, LuTrash2, LuX, LuCheck, LuWorkflow, LuBlocks, LuLibrary, LuFolderTree, LuUndo2, LuCode, LuCopy, LuChevronLeft, LuSquareArrowOutUpRight,
 } from 'react-icons/lu';
 import {
   Badge, Checkbox, Combobox, DiffView, EmptyState, Field, IconButton, Modal, Sash, Section, Segmented, Select, StatusDot, Switch, useLocalState, usePanelSize, useToast,
@@ -31,7 +32,7 @@ const clone = (v) => JSON.parse(JSON.stringify(v));
 const snap = (n) => Math.max(0, Math.round(n / SNAP) * SNAP);
 const parseList = (t) => t.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
 
-function typeOf(v) {
+export function typeOf(v) {
   if (typeof v === 'boolean') return 'boolean';
   if (typeof v === 'number') return 'number';
   if (Array.isArray(v)) return v.every((i) => ['string', 'number', 'boolean'].includes(typeof i)) ? 'list' : 'object';
@@ -39,13 +40,13 @@ function typeOf(v) {
   return 'string';
 }
 
-function emptyValueFor(prop) {
+export function emptyValueFor(prop) {
   if (prop.defaultValue !== undefined && prop.defaultValue !== null) return clone(prop.defaultValue);
   return { boolean: false, list: [], number: 0, object: {}, string: '' }[prop.type] ?? '';
 }
 
 function newScenario(n) {
-  return { id: uid(), name: '', description: '', labelsText: '', namespaces: [], nodes: [], edges: [], _n: n };
+  return { id: uid(), name: '', description: '', labelsText: '', namespaces: [], clearOutput: null, nodes: [], edges: [], _n: n };
 }
 
 // The sequence is the single chain formed by the edges. Anything that isn't one
@@ -142,7 +143,7 @@ function JsonEditor({ value, onChange }) {
   );
 }
 
-function ValueEditor({ propKey, value, prop, suggestions, onChange }) {
+export function ValueEditor({ propKey, value, prop, suggestions, onChange }) {
   const t = value === null || value === undefined ? prop?.type || 'string' : typeOf(value);
   if (t === 'boolean') return <Switch checked={!!value} onChange={onChange} label={String(!!value)} />;
   if (t === 'number') return <input className="input" type="number" value={value ?? ''} onChange={(e) => onChange(e.target.value === '' ? '' : Number(e.target.value))} />;
@@ -160,7 +161,7 @@ function ValueEditor({ propKey, value, prop, suggestions, onChange }) {
   );
 }
 
-const TYPE_CHOICES = [
+export const TYPE_CHOICES = [
   { value: 'string', label: 'text' },
   { value: 'boolean', label: 'true / false' },
   { value: 'number', label: 'number' },
@@ -168,7 +169,7 @@ const TYPE_CHOICES = [
   { value: 'object', label: 'json' },
 ];
 
-function convertValue(value, to) {
+export function convertValue(value, to) {
   if (to === 'boolean') return value === true || value === 'true';
   if (to === 'number') return Number(value) || 0;
   if (to === 'list') return Array.isArray(value) ? value : value === '' || value == null ? [] : String(value).split(/[\s,]+/).filter(Boolean);
@@ -190,7 +191,7 @@ function scenarioYamlSections(s) {
   return [
     { key: 'workflows', items: uniq('workflow') },
     { key: 'endpoint_interactions', items: uniq('endpoint') },
-    { key: 'scenarios', items: [{ name: s.name.trim(), description: s.description.trim(), supported_namespaces: s.namespaces, labels: parseList(s.labelsText), sequence: nodes.map((n) => n.def.name) }] },
+    { key: 'scenarios', items: [{ name: s.name.trim(), description: s.description.trim(), supported_namespaces: s.namespaces, labels: parseList(s.labelsText), ...(typeof s.clearOutput === 'boolean' ? { clear_output: s.clearOutput } : {}), sequence: nodes.map((n) => n.def.name) }] },
   ];
 }
 
@@ -897,7 +898,7 @@ function SaveModal({ payload, chainProblems, onClose }) {
 // A stable fingerprint of what is editable in a scenario list (positions are not part of it).
 const sig = (list) =>
   JSON.stringify(
-    list.map((s) => [s.name, s.description, s.labelsText, s.namespaces, s.nodes.map((n) => [n.kind, n.def, n.origName]), s.edges.map((e) => [e.from, e.to])])
+    list.map((s) => [s.name, s.description, s.labelsText, s.namespaces, s.clearOutput ?? null, s.nodes.map((n) => [n.kind, n.def, n.origName]), s.edges.map((e) => [e.from, e.to])])
   );
 
 function SaveChangesModal({ relPath, payload, onClose, onSaved }) {
@@ -1015,7 +1016,7 @@ function TestModal({ scenario, namespaces, defaultNamespace, busy, error, onRun,
   );
 }
 
-function TestRunPanel({ run, flow, sources, tab, setTab, traces, traceFocus, height, maximized, onSize, onReset, onStop, onToggleMax, onCollapse, onClose, collapsed }) {
+function TestRunPanel({ onPopout, run, flow, sources, tab, setTab, traces, traceFocus, height, maximized, onSize, onReset, onStop, onToggleMax, onCollapse, onClose, collapsed }) {
   const running = run.status === 'running' || run.status === 'starting';
   return (
     <div className={`dock ${collapsed ? 'collapsed' : ''}`} style={collapsed ? undefined : { height }}>
@@ -1048,6 +1049,7 @@ function TestRunPanel({ run, flow, sources, tab, setTab, traces, traceFocus, hei
             <LuX size={13} /> Stop
           </button>
         )}
+        {onPopout && <IconButton size="sm" icon={<LuSquareArrowOutUpRight size={14} />} title={`Open the run output in a separate window (${shortcutLabel('L')})`} onClick={onPopout} />}
         <IconButton size="sm" icon={maximized ? <LuMinimize2 size={14} /> : <LuMaximize2 size={14} />} title={maximized ? 'Restore panel size' : 'Maximize panel'} onClick={onToggleMax} />
         <IconButton size="sm" icon={collapsed ? <LuChevronRight size={15} style={{ transform: 'rotate(-90deg)' }} /> : <LuChevronDown size={15} />} title={collapsed ? 'Expand panel' : 'Collapse panel'} onClick={onCollapse} />
         <IconButton size="sm" icon={<LuX size={15} />} title="Close panel" onClick={onClose} />
@@ -1075,6 +1077,7 @@ const toScenarioPayload = (s) => {
     description: s.description.trim(),
     labels: parseList(s.labelsText),
     supportedNamespaces: s.namespaces,
+    clearOutput: typeof s.clearOutput === 'boolean' ? s.clearOutput : undefined,
     sequence: sq.order.map((id) => ({ kind: byId[id].kind, def: byId[id].def })),
   };
 };
@@ -1135,6 +1138,9 @@ export default function CreateTestView({ active, mode = 'create' }) {
   const [dockTraceFocus, setDockTraceFocus] = useState(null);
   const [dockSheet, setDockSheet] = useState(null);
   const testTraces = useRunTraces(testRun?.id, testRun?.status);
+  useEffect(() => {
+    if (testRun?.id) setActiveRun(testRun.id);
+  }, [testRun?.id]);
   const traceLinks = useMemo(() => {
     const known = new Set();
     const byStep = {};
@@ -1207,7 +1213,7 @@ export default function CreateTestView({ active, mode = 'create' }) {
         x: 60 + (i % perRow) * colW, y: 60 + Math.floor(i / perRow) * (NODE_H + 60),
       }));
       const edges = nodes.slice(1).map((n, i) => ({ from: nodes[i].id, to: n.id }));
-      return { id: uid(), name: sc0.name || '', description: sc0.description || '', labelsText: sc0.labels.join(' '), namespaces: sc0.supportedNamespaces, nodes, edges, origIndex: sc0.index, origName: sc0.name };
+      return { id: uid(), name: sc0.name || '', description: sc0.description || '', labelsText: sc0.labels.join(' '), namespaces: sc0.supportedNamespaces, clearOutput: typeof sc0.clearOutput === 'boolean' ? sc0.clearOutput : null, nodes, edges, origIndex: sc0.index, origName: sc0.name };
     });
   };
 
@@ -1395,6 +1401,7 @@ export default function CreateTestView({ active, mode = 'create' }) {
       description: s0.description == null ? '' : String(s0.description),
       labelsText: (Array.isArray(s0.labels) ? s0.labels : []).map(String).join(' '),
       namespaces: (Array.isArray(s0.supported_namespaces) ? s0.supported_namespaces : []).map(String),
+      clearOutput: typeof s0.clear_output === 'boolean' ? s0.clear_output : null,
       nodes,
       edges,
     };
@@ -1423,6 +1430,7 @@ export default function CreateTestView({ active, mode = 'create' }) {
         description: s.description.trim(),
         labels: parseList(s.labelsText),
         supportedNamespaces: s.namespaces,
+        clearOutput: typeof s.clearOutput === 'boolean' ? s.clearOutput : undefined,
         sequence: q.order.map((id) => ({ kind: byId[id].kind, def: byId[id].def, origName: byId[id].origName || null, unresolved: byId[id].unresolved })),
       };
     });
@@ -1611,7 +1619,17 @@ export default function CreateTestView({ active, mode = 'create' }) {
         <div className="notice warn banner"><LuCircleAlert size={15} /><div>{file.unresolved.length} sequence entr{file.unresolved.length === 1 ? 'y is' : 'ies are'} not defined in this file ({file.unresolved.slice(0, 3).join('; ')}). Saving is blocked until they resolve.</div></div>
       )}
 
-      <Section title="Scenario details" flush storageKey="bld.sec.details" className="details-section" badge={sc.namespaces.length ? `${sc.namespaces.length} namespace${sc.namespaces.length === 1 ? '' : 's'}` : null}>
+      <Section title="Scenario details" flush storageKey="bld.sec.details" className="details-section" actions={
+        <span className="mini-select" title="clear_output: wipe the output/ folder before this scenario runs. Default leaves the key out (the suite then clears it).">
+          <span>Clear output</span>
+          <Select
+            size="sm"
+            value={typeof sc.clearOutput === 'boolean' ? String(sc.clearOutput) : 'unset'}
+            onChange={(v) => updateActive((s) => ({ ...s, clearOutput: v === 'unset' ? null : v === 'true' }))}
+            options={[{ value: 'unset', label: 'Default' }, { value: 'true', label: 'Yes' }, { value: 'false', label: 'No' }]}
+          />
+        </span>
+      } badge={sc.namespaces.length ? `${sc.namespaces.length} namespace${sc.namespaces.length === 1 ? '' : 's'}` : null}>
         <div className="details-grid">
           <Field label="Scenario name" hint="Needed to save, not to test">
             <input className="input" value={sc.name} onChange={(e) => updateActive((s) => ({ ...s, name: e.target.value }))} placeholder="register-then-login" spellCheck={false} />
@@ -1745,6 +1763,7 @@ export default function CreateTestView({ active, mode = 'create' }) {
               onToggleMax={() => { setDockCollapsed(false); setDockMax((m) => !m); }}
               onCollapse={() => setDockCollapsed((c) => !c)}
               onClose={() => setTestOpen(false)}
+              onPopout={() => { if (!openPopout(`run-${testRun.id}-all`, { kind: 'run', run: testRun.id, view: 'logs' })) toast('The browser blocked the new window. Allow pop-ups for this site and try again.', 'error'); }}
             />
             </TraceLinkContext.Provider>
           )}

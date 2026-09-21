@@ -12,6 +12,9 @@ const testBuilder = require('./testBuilder');
 const tempo = require('./tempo');
 const explorer = require('./explorer');
 const gitApi = require('./git');
+const ocLogin = require('./ocLogin');
+const defaultsConfig = require('./defaultsConfig');
+const envFile = require('./envFile');
 
 const PORT = process.env.DASHBOARD_PORT || 4570;
 
@@ -33,6 +36,12 @@ function broadcast(runId, message) {
 const runManager = new RunManager(broadcast);
 testBuilder.cleanupDrafts(); // drop drafts a previous crash may have left behind
 
+// An expired cluster login is reported distinctly so the UI can offer to log in again instead of a raw error.
+const ocFail = (res, err) => {
+  if (ocLogin.isAuthError(err.message)) return res.status(401).json({ code: 'OC_LOGIN_REQUIRED', error: 'Your OpenShift login has expired. Log in again to continue.' });
+  return res.status(502).json({ error: err.message });
+};
+
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
 app.get('/api/defaults', (req, res) => {
@@ -52,7 +61,7 @@ app.post('/api/oc/projects', async (req, res) => {
     const projects = await listProjects(req.body || {});
     res.json({ projects });
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    ocFail(res, err);
   }
 });
 
@@ -72,6 +81,7 @@ app.post('/api/oc/pods', async (req, res) => {
       errors.push({ namespace: ns, message: err.message });
     }
   }
+  if (!pods.length && errors.length && errors.every((e) => ocLogin.isAuthError(e.message))) return ocFail(res, new Error(errors[0].message));
   res.json({ pods, errors });
 });
 
@@ -111,7 +121,7 @@ app.post('/api/oc/deployments', async (req, res) => {
   try {
     res.json({ deployments: await listDeployments(cfg, namespace) });
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    ocFail(res, err);
   }
 });
 
@@ -121,7 +131,7 @@ app.post('/api/oc/services', async (req, res) => {
   try {
     res.json({ services: await listServices(cfg, namespace) });
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    ocFail(res, err);
   }
 });
 
@@ -131,7 +141,7 @@ app.post('/api/oc/secrets', async (req, res) => {
   try {
     res.json({ secrets: await listSecretsMeta(cfg, namespace) });
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    ocFail(res, err);
   }
 });
 
@@ -243,7 +253,7 @@ app.get('/api/git/status', wrap(() => gitApi.status()));
 app.get('/api/git/branches', wrap(() => gitApi.branches()));
 app.get('/api/git/log', wrap(async (req) => ({ commits: await gitApi.log(req.query.limit) })));
 app.get('/api/git/diff', wrap(async (req) => ({
-  diff: await gitApi.diff(String(req.query.path || ''), { untracked: req.query.untracked === '1' }),
+  diff: await gitApi.diff(String(req.query.path || ''), { untracked: req.query.untracked === '1', staged: req.query.staged === '1' }),
 })));
 app.post('/api/git/checkout', wrap(async (req) => { guardRun('switching branches'); return gitApi.checkout((req.body || {}).branch); }));
 app.post('/api/git/branch', wrap((req) => gitApi.createBranch((req.body || {}).name, (req.body || {}).from)));
@@ -251,7 +261,8 @@ app.post('/api/git/fetch', wrap(async () => ({ output: await gitApi.fetchRemote(
 app.post('/api/git/pull', wrap(async (req) => { guardRun('pulling'); return { output: await gitApi.pull((req.body || {}).strategy) }; }));
 app.post('/api/git/stage', wrap(async (req) => { await gitApi.stage((req.body || {}).paths); return gitApi.status(); }));
 app.post('/api/git/unstage', wrap(async (req) => { await gitApi.unstage((req.body || {}).paths); return gitApi.status(); }));
-app.post('/api/git/commit', wrap(async (req) => ({ output: await gitApi.commit((req.body || {}).message, (req.body || {}).paths), status: await gitApi.status() })));
+app.post('/api/git/commit', wrap(async (req) => ({ output: await gitApi.commit((req.body || {}).message), status: await gitApi.status() })));
+app.post('/api/git/push', wrap(async () => ({ output: await gitApi.push(), status: await gitApi.status() })));
 
 // ---- tracing (Tempo via managed oc port-forward; read-only) ----
 app.get('/api/tracing/status', async (req, res) => res.json(await tempo.status()));
@@ -279,7 +290,7 @@ app.get('/api/runs/:id/traces', async (req, res) => {
   if (!info) return res.status(404).json({ error: 'not found' });
   try {
     const looked = await Promise.all(
-      info.traces.slice(0, 40).map(async (t) => {
+      info.traces.slice(0, 80).map(async (t) => {
         try {
           const tr = await tempo.getTrace(t.traceId);
           return { ...t, found: tr.found, summary: tr.summary };
@@ -362,6 +373,68 @@ app.post('/api/runs/:id/stop', (req, res) => {
 });
 
 // Serve the built client, if present, so a single port does everything.
+// ---- OpenShift session (log in again from the dashboard when the 24h login has expired) ----
+app.get('/api/oc/session', wrap(() => ocLogin.session()));
+app.post('/api/oc/login', wrap((req) => ocLogin.login(req.body || {})));
+
+// ---- default configs (config/defaults/*.yaml) ----
+app.get('/api/default-configs', wrap(() => {
+  const schema = testBuilder.getSchema();
+  const sections = {};
+  for (const id of Object.keys(defaultsConfig.SECTIONS)) sections[id] = defaultsConfig.read(id);
+  const seen = new Map();
+  for (const ns of sections.namespaces.namespaces) for (const e of ns.entries) if (!seen.has(e.key)) seen.set(e.key, e);
+  const known = new Map();
+  for (const prop of [...schema.workflowProps, ...schema.endpointProps]) if (!known.has(prop.key)) known.set(prop.key, prop);
+  for (const [key, e] of seen) {
+    if (known.has(key)) continue;
+    const v = e.value;
+    known.set(key, { key, type: typeof v === 'boolean' ? 'boolean' : typeof v === 'number' ? 'number' : Array.isArray(v) ? 'list' : v && typeof v === 'object' ? 'object' : 'string', description: e.comment || 'used in another namespace', source: 'defaults' });
+  }
+  return {
+    sections,
+    suggestions: schema.suggestions,
+    catalog: { namespaces: [...known.values()].sort((a, b) => a.key.localeCompare(b.key)), workflows: schema.workflowProps, endpoints: schema.endpointProps },
+  };
+}));
+const defaultsPlan = async (body) => {
+  const p = defaultsConfig.plan(String(body.section || ''), body.ops, body.hash);
+  return { ...p, diff: p.changed ? await gitApi.diffTexts(p.oldText, p.newText, p.relPath) : '' };
+};
+app.post('/api/default-configs/preview', wrap(async (req) => {
+  const p = await defaultsPlan(req.body || {});
+  return { ok: true, changed: p.changed, relPath: p.relPath, diff: p.diff };
+}));
+app.post('/api/default-configs/save', wrap(async (req) => {
+  guardRun('editing the default configs');
+  return defaultsConfig.save(String((req.body || {}).section || ''), (req.body || {}).ops, (req.body || {}).hash);
+}));
+
+// ---- .env of the test project ----
+const envHash = (t) => require('crypto').createHash('sha1').update(t).digest('hex');
+app.get('/api/env', wrap(async () => {
+  const r = envFile.read();
+  let ignored = null;
+  try { ignored = await gitApi.isIgnored('.env'); } catch (_) { /* not a git checkout */ }
+  return { exists: r.exists, path: '.env', ignored, hash: envHash(r.text), text: r.text, entries: r.entries, known: envFile.scanUsedKeys() };
+}));
+app.post('/api/env/save', wrap((req) => {
+  guardRun('editing .env');
+  const body = req.body || {};
+  const cur = envFile.read();
+  if (body.hash && body.hash !== envHash(cur.text)) throw new Error('.env changed on disk since you opened it. Reload and redo your changes.');
+  const next = typeof body.text === 'string' ? body.text : envFile.applyOps(cur.text, Array.isArray(body.ops) ? body.ops : []);
+  const before = new Map(cur.entries.map((e) => [e.key, e.value]));
+  const after = new Map(envFile.parse(next).map((e) => [e.key, e.value]));
+  const summary = {
+    added: [...after.keys()].filter((k) => !before.has(k)),
+    removed: [...before.keys()].filter((k) => !after.has(k)),
+    changed: [...after.keys()].filter((k) => before.has(k) && before.get(k) !== after.get(k)),
+  };
+  if (next !== cur.text) envFile.write(next);
+  return { ok: true, summary, hash: envHash(next) };
+}));
+
 const clientDist = path.join(__dirname, '..', 'client', 'dist');
 app.use(express.static(clientDist));
 app.get('*', (req, res, next) => {

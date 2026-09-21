@@ -2,10 +2,12 @@ import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { api, wsUrl } from './api.js';
 import LogPanel from './LogPanel.jsx';
 import ScenarioFlow from './ScenarioFlow.jsx';
-import { LuCircleAlert, LuHistory, LuLoader, LuPanelLeftClose, LuPanelLeftOpen, LuPlay, LuRefreshCw, LuSearch, LuServer, LuSquare, LuTags, LuTerminal, LuWorkflow } from 'react-icons/lu';
+import { LuCircleAlert, LuHistory, LuLoader, LuPanelLeftClose, LuPanelLeftOpen, LuPlay, LuRefreshCw, LuSearch, LuServer, LuSquare, LuSquareArrowOutUpRight, LuTags, LuTerminal, LuWorkflow } from 'react-icons/lu';
 import { TracesPanel, TraceSheet, TraceLinkContext, useRunTraces } from './tracing.jsx';
 import { LuWaypoints } from 'react-icons/lu';
-import { Checkbox, Combobox, EmptyState, Field, IconButton, Sash, Section, Segmented, Select, usePanelSize, useLocalState, StatusDot } from './ui.jsx';
+import { useOnOcLogin } from './OcSession.jsx';
+import { openPopout, setActiveRun, shortcutLabel } from './popout.js';
+import { Checkbox, Combobox, EmptyState, Field, IconButton, Sash, Section, MenuButton, Segmented, Select, usePanelSize, useLocalState, useToast, StatusDot } from './ui.jsx';
 
 const DEBOUNCE_MS = 450;
 
@@ -32,6 +34,7 @@ function useDebounced(value, delay) {
 }
 
 export default function TestsView() {
+  const toast = useToast();
   const [env, setEnv] = useState('dev');
   const [labelsText, setLabelsText] = useState('');
   const [exclusionText, setExclusionText] = useState('eid');
@@ -192,6 +195,12 @@ export default function TestsView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedNamespaces, env]);
 
+  // after logging in again, reload what the expired login could not fetch
+  useOnOcLogin(() => {
+    fetchNamespaces();
+    fetchPods();
+  });
+
   const togglePod = (namespace, name) => {
     const key = podKey(namespace, name);
     setSelectedPods((prev) => {
@@ -288,6 +297,15 @@ export default function TestsView() {
   }, {});
 
   const running = currentRun && (currentRun.status === 'running' || currentRun.status === 'starting');
+
+  useEffect(() => {
+    if (currentRun?.id) setActiveRun(currentRun.id);
+  }, [currentRun?.id]);
+
+  const popOut = (params, key) => {
+    if (!currentRun) return;
+    if (!openPopout(`run-${currentRun.id}-${key}`, { kind: 'run', run: currentRun.id, ...params })) toast('The browser blocked the new window. Allow pop-ups for this site and try again.', 'error');
+  };
   const canRun = namespace.trim() && parseList(labelsText).length > 0 && !starting;
 
   return (
@@ -450,6 +468,21 @@ export default function TestsView() {
           ) : (
             <span className="muted">No run yet</span>
           )}
+          {currentRun && (
+            <MenuButton
+              className="btn sm"
+              icon={<LuSquareArrowOutUpRight size={14} />}
+              label="Pop out"
+              title="Open this run's output in a separate window, e.g. on another screen"
+              items={[
+                { key: 'h', heading: 'Open in a separate window' },
+                { key: 'logs', label: activeTab === 'all' ? 'All logs' : `Logs: ${activeTab}`, onClick: () => popOut({ view: 'logs', source: activeTab, only: '1' }, `logs-${activeTab}`) },
+                { key: 'all', label: 'Everything (logs, flow, traces)', hint: shortcutLabel('L'), onClick: () => popOut({ view: 'logs' }, 'all') },
+                { key: 'flow', label: 'Scenario flow', onClick: () => popOut({ view: 'flow' }, 'flow') },
+                { key: 'traces', label: 'Traces', onClick: () => popOut({ view: 'traces' }, 'traces') },
+              ]}
+            />
+          )}
           {running && (
             <button type="button" className="btn sm danger" onClick={stopRun}>
               <LuSquare size={12} /> Stop
@@ -479,9 +512,9 @@ export default function TestsView() {
               ))}
             </div>
             {activeTab === 'all' ? (
-              <LogPanel title="all" entries={allEntries} />
+              <LogPanel title="all" entries={allEntries} onPopout={currentRun ? () => popOut({ view: 'logs', source: 'all', only: '1' }, 'logs-all') : undefined} />
             ) : (
-              <LogPanel key={activeTab} title={activeTab} entries={sources[activeTab] || []} />
+              <LogPanel key={activeTab} title={activeTab} entries={sources[activeTab] || []} onPopout={currentRun ? () => popOut({ view: 'logs', source: activeTab, only: '1' }, `logs-${activeTab}`) : undefined} />
             )}
           </>
         )}

@@ -472,7 +472,7 @@ function normalize(payload) {
 
     const labels = [...new Set((sc.labels || []).map((l) => String(l).trim()).filter(Boolean))];
     if (!labels.some((l) => UUID_RE.test(l))) labels.push(crypto.randomUUID());
-    out.push({ name: sc.name, description: sc.description || '', supported_namespaces: sc.supportedNamespaces, labels, sequence: sequenceNames });
+    out.push({ name: sc.name, description: sc.description || '', supported_namespaces: sc.supportedNamespaces, labels, ...(typeof sc.clearOutput === 'boolean' ? { clear_output: sc.clearOutput } : {}), sequence: sequenceNames });
   }
   return { errors, workflows, endpoints, scenarios: out };
 }
