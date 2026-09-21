@@ -3,7 +3,11 @@ const BASE = '';
 async function j(res) {
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `${res.status} ${res.statusText}`);
+    const err = new Error(body.error || `${res.status} ${res.statusText}`);
+    err.code = body.code;
+    // an expired cluster login: let the app offer to log in again (see OcSession.jsx)
+    if (body.code === 'OC_LOGIN_REQUIRED') window.dispatchEvent(new CustomEvent('oc-login-required'));
+    throw err;
   }
   return res.json();
 }
@@ -27,12 +31,15 @@ export const api = {
     status: () => fetch(`${BASE}/api/git/status`).then(j),
     branches: () => fetch(`${BASE}/api/git/branches`).then(j),
     log: () => fetch(`${BASE}/api/git/log?limit=30`).then(j),
-    diff: (path, untracked) => fetch(`${BASE}/api/git/diff?path=${encodeURIComponent(path)}${untracked ? '&untracked=1' : ''}`).then(j),
+    diff: (path, { untracked, staged } = {}) => fetch(`${BASE}/api/git/diff?path=${encodeURIComponent(path)}${untracked ? '&untracked=1' : ''}${staged ? '&staged=1' : ''}`).then(j),
+    stage: (paths) => post('/api/git/stage', { paths }),
+    unstage: (paths) => post('/api/git/unstage', { paths }),
+    push: () => post('/api/git/push', {}),
     checkout: (branch) => post('/api/git/checkout', { branch }),
     createBranch: (name, from) => post('/api/git/branch', { name, from }),
     fetch: () => post('/api/git/fetch', {}),
     pull: (strategy) => post('/api/git/pull', { strategy }),
-    commit: (message, paths) => post('/api/git/commit', { message, paths }),
+    commit: (message) => post('/api/git/commit', { message }),
   },
   tracing: {
     status: () => fetch(`${BASE}/api/tracing/status`).then(j),
@@ -73,6 +80,17 @@ export const api = {
     save: (payload) =>
       fetch(`${BASE}/api/builder/save`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }).then((r) => r.json()),
     validate: (payload) => post('/api/builder/validate', payload),
+  },
+  ocSession: () => fetch(`${BASE}/api/oc/session`).then(j),
+  ocLogin: (server, code) => post('/api/oc/login', { server, code }),
+  defaultConfigs: {
+    get: () => fetch(`${BASE}/api/default-configs`).then(j),
+    preview: (payload) => post('/api/default-configs/preview', payload),
+    save: (payload) => post('/api/default-configs/save', payload),
+  },
+  env: {
+    get: () => fetch(`${BASE}/api/env`).then(j),
+    save: (payload) => post('/api/env/save', payload),
   },
   oc: {
     deployments: (cfg) => post('/api/oc/deployments', cfg),

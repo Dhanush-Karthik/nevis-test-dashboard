@@ -65,9 +65,50 @@ class ScenarioFlowTracker {
     return out;
   }
 
+  // Trace ids found in the components' own logs (pod tails), which need no help from the suite:
+  // each log line carries the W3C trace id of the request it handled, and the suite's requests
+  // carry its traceparent. A trace is attributed to the step whose time window its first line
+  // falls in, so failed flows are covered even when the suite never logged its own ids.
+  // `logTraces`: Map(traceId -> {firstTs, lastTs, errors, warns, count, source, sample}).
+  traceRefsFromLogs(logTraces, known = new Set()) {
+    const GRACE = 6000;
+    const now = Date.now();
+    const out = [];
+    for (const test of this.tests) {
+      const testEnd = (test.endedAt || now) + GRACE;
+      for (let i = 0; i < test.steps.length; i += 1) {
+        const step = test.steps[i];
+        const from = step.startedAt - 1500;
+        const to = i < test.steps.length - 1 ? test.steps[i + 1].startedAt - 1500 : testEnd;
+        for (const t of logTraces.values()) {
+          if (known.has(t.traceId) || t.firstTs < from || t.firstTs >= to) continue;
+          out.push({
+            traceId: t.traceId,
+            testId: test.id,
+            scenarioName: test.scenarioName || test.nodeId,
+            stepId: step.id,
+            stepName: step.name,
+            stepType: step.type,
+            startedAt: t.firstTs,
+            origin: 'logs',
+            source: t.source,
+            errors: t.errors,
+            warns: t.warns,
+            lines: t.count,
+            sample: t.sample,
+          });
+        }
+      }
+    }
+    return out;
+  }
+
   _finishRunningStep(test, status) {
     const last = test.steps[test.steps.length - 1];
-    if (last && last.status === 'running') last.status = status;
+    if (last && last.status === 'running') {
+      last.status = status;
+      last.endedAt = Date.now();
+    }
   }
 
   // Closes the currently open action's log range (an action owns every pytest
@@ -142,6 +183,7 @@ class ScenarioFlowTracker {
       const outcome = outcomeMatch[1].toLowerCase();
       this._closeAction(seq - 1);
       this.currentTest.outcome = outcome;
+      this.currentTest.endedAt = Date.now();
       this._finishRunningStep(this.currentTest, outcome === 'passed' ? 'done' : 'failed');
       return true;
     }

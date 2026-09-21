@@ -140,7 +140,56 @@ edited in all of them at once. Keys the editor does not model (e.g. `clear_outpu
 ## Git
 
 The integration-tests repo from the dashboard: current branch and ahead/behind, switch branch (remote-only branches get a local
-tracking branch), create a branch, fetch, pull (fast-forward only by default; rebase/merge selectable), the changed files with
-the real unified diff against HEAD, and commit exactly the ticked files. Nothing is pushed. Checkout and pull are refused
-while a test run is in progress.
+tracking branch), create a branch, fetch, pull (fast-forward only by default; rebase/merge selectable).
 
+Committing follows the usual stage, commit, push flow:
+
+- **Changes** lists what differs from the index; nothing is selected by default. Stage files with **+** (or **Stage all**).
+- **Staged changes** is exactly what the next commit contains. Unstage with **−**. Click a file to see its real diff
+  (staged files show what will be committed).
+- **Commit** commits only the staged files (Ctrl/⌘ Enter in the message box).
+- **Push** sends the current branch to origin after a confirmation. The first push of a new branch sets its upstream.
+  It never forces, so it stops if origin has commits you don't have.
+
+Checkout, pull and editing the defaults or `.env` are refused while a test run is in progress.
+
+## Settings: default configs
+
+The **Settings** tab holds two editors (toggle at the top): **Default configs** and **.env**. Default configs edits `config/defaults/*.yaml`: per-namespace values, and the defaults every workflow or endpoint
+interaction starts from.
+
+- Pick a section (Namespaces, Workflows, Endpoint interactions) and, for namespaces, the namespace.
+- **Add a config…** lists the known configs that are not set yet (documented ones, ones discovered from the pytest code, and
+  ones seen in other namespaces). Choosing one adds it with the right editor and its description as the comment. A custom key
+  can be added too.
+- Edit values with the same typed editors as the scenario editor; remove a config with the bin icon; undo any change before saving.
+- **New namespace** can copy every value from an existing namespace. **Delete namespace** shows what will be removed first.
+- **Review & save** shows the exact YAML diff. Only the changed lines are rewritten: comments, order and formatting elsewhere stay.
+
+## Settings: .env
+
+The **.env** editor in Settings edits the test project's `.env`:
+
+- Values are hidden by default (per row, or **Show values**). Adding a variable offers the names the project reads
+  (from the code and from `api_key_name` in the defaults) that are not set yet.
+- **Raw text** edits the file directly. Comments and ordering are kept when using the Variables view.
+- Saving shows which variable names were added, changed or removed, never their values.
+- A warning appears if `.env` is not ignored by git. A new file is created readable by you only (mode 600).
+
+## OpenShift login
+
+`oc` logins expire after about 24 hours. When that happens the sidebar chip turns amber, and any cluster action that fails
+for that reason opens a login dialog: enter the cluster address (host:port, remembered in the browser) and the one-time passcode
+from your identity provider's passcode page, and the dashboard runs `oc login` for you, then reloads what it could not fetch.
+The passcode is used for that single command and is never stored or logged.
+
+## Separate windows
+
+Any view can be opened in its own browser window, for example to keep the logs on another screen while the run is on the first:
+
+- Hover a sidebar item and click the pop-out icon, or press **Ctrl+Alt+O** (**⌘⌥O** on a Mac) for the current view.
+- In **Run tests**, **Pop out** opens the run's logs (one source or all), scenario flow, traces, or everything. The log toolbar
+  and the Explorer/Create test run panel have the same button. **Ctrl+Alt+L** (**⌘⌥L**) opens the latest run's output.
+- Run windows are live views of the run. View windows are independent of the main window, so two windows can do different work.
+
+Allow pop-ups for the dashboard's address if the browser blocks the new window.

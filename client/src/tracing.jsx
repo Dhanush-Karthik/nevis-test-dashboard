@@ -692,7 +692,7 @@ export function TracesPanel({ runTraces, focus }) {
           </div>
           <div className="panel-scroll tight">
             {error && <div className="notice warn small"><LuCircleAlert size={14} /><div>{error}</div></div>}
-            {!tracingSupported && (
+            {!tracingSupported && !traces.length && (
               <div className="notice warn small">
                 <LuCircleAlert size={14} />
                 <div>This checkout does not send trace context (<span className="mono">lib/tracing.py</span> is missing). Traces need the changes from branch <span className="mono">SEK-200299-traceparent-headers</span>.</div>
@@ -711,7 +711,7 @@ export function TracesPanel({ runTraces, focus }) {
                         className={`trace-item ${selected?.traceId === t.traceId ? 'active' : ''}`}
                         onClick={() => setSelected({ traceId: t.traceId, spanId: null })}
                       >
-                        <StatusDot status={t.found ? (t.summary?.errorCount ? 'failed' : 'passed') : running ? 'running' : 'stopped'} />
+                        <StatusDot status={t.found ? (t.summary?.errorCount || t.errors ? 'failed' : 'passed') : t.errors ? 'failed' : running ? 'running' : 'stopped'} />
                         <div className="trace-item-text">
                           <div className="trace-item-name mono">
                             {traceLabel(t)}
@@ -721,6 +721,12 @@ export function TracesPanel({ runTraces, focus }) {
                             {t.found ? `${t.summary.spanCount} spans · ${fmtDur(t.summary.durUs)}` : t.error ? 'lookup failed' : 'waiting for Tempo…'}
                             {' · '}<span className="mono">{shortId(t.traceId)}</span>
                           </div>
+                          {t.origin === 'logs' && (
+                            <div className="trace-item-meta" title={t.sample || ''}>
+                              {t.errors ? `${t.errors} error line${t.errors === 1 ? '' : 's'}` : t.warns ? `${t.warns} warning${t.warns === 1 ? '' : 's'}` : 'seen in component logs'}
+                              {t.source ? ` · ${String(t.source).replace(/^pod:[^/]*\//, '')}` : ''}
+                            </div>
+                          )}
                           {t.found && (
                             <div className="trace-item-svcs">
                               {t.summary.services.map((sv) => <span key={sv} className="svc-dot" title={sv} style={{ background: colorFor(sv) }} />)}

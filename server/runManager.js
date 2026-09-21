@@ -10,6 +10,14 @@ const { ScenarioFlowTracker } = require('./flowTracker');
 const MAX_LINES_PER_SOURCE = 20000;
 const { REPO_ROOT, PYTEST_BIN } = require('./paths');
 
+// Trace ids as the components print them: `<timestamp> <32-hex trace> <16-hex span> ...` (also inside
+// printed traceparent headers). Level words mark lines worth a closer look on a failed flow.
+const LOG_TRACE_RE = /(?:^|[\s\[])([0-9a-f]{32})\s+[0-9a-f]{16}(?=\s)|traceparent\W{1,6}00-([0-9a-f]{32})-[0-9a-f]{16}/i;
+const ERROR_RE = /\b(ERROR|SEVERE|FATAL|Exception)\b/;
+const WARN_RE = /\bWARN(?:ING)?\b/;
+const MAX_LOG_TRACES = 6000;
+const MAX_LOG_TRACES_PER_STEP = 8;
+
 class RunManager {
   constructor(broadcast) {
     this.runs = new Map(); // runId -> run
@@ -31,8 +39,31 @@ class RunManager {
       startedAt: run.createdAt,
       endedAt: run.endedAt || null,
       tracingSupported: fs.existsSync(path.join(REPO_ROOT, 'lib', 'tracing.py')),
-      traces: run.flowTracker.tracesSnapshot(),
+      traces: this._mergedTraces(run),
     };
+  }
+
+  // Ids the suite reported, plus ids harvested from component logs for the same steps. Within a step,
+  // traces with errors come first, so a failed step's "View trace" opens the failing request.
+  _mergedTraces(run) {
+    const reported = run.flowTracker.tracesSnapshot();
+    const known = new Set(reported.map((t) => t.traceId));
+    const fromLogs = run.flowTracker.traceRefsFromLogs(run.logTraces, known);
+    const failedSteps = new Set();
+    for (const test of run.flowTracker.snapshot()) for (const s of test.steps) if (s.status === 'failed') failedSteps.add(s.id);
+    const rank = (t) => (t.errors ? 0 : t.origin === 'logs' ? 2 : 1);
+    const groups = new Map();
+    for (const t of [...reported, ...fromLogs]) {
+      const g = groups.get(t.stepId) || groups.set(t.stepId, []).get(t.stepId);
+      g.push(t.origin === 'logs' ? { ...t, onFailedStep: failedSteps.has(t.stepId) } : t);
+    }
+    const out = [];
+    for (const g of groups.values()) {
+      g.sort((a, b) => rank(a) - rank(b) || a.startedAt - b.startedAt);
+      let fromLogsSeen = 0;
+      for (const t of g) if (t.origin !== 'logs' || (fromLogsSeen += 1) <= MAX_LOG_TRACES_PER_STEP) out.push(t);
+    }
+    return out;
   }
 
   get(runId) {
@@ -67,7 +98,31 @@ class RunManager {
     }
     buf.push(entry);
     if (buf.length > MAX_LINES_PER_SOURCE) buf.shift();
+    if (stream === 'log') this._noteLogTrace(run, source, entry);
     this.broadcast(run.id, { type: 'log', runId: run.id, entry });
+  }
+
+  _noteLogTrace(run, source, entry) {
+    const m = entry.line.match(LOG_TRACE_RE);
+    const id = m && (m[1] || m[2]);
+    if (!id) return;
+    const traceId = id.toLowerCase();
+    if (/^0+$/.test(traceId)) return;
+    let t = run.logTraces.get(traceId);
+    if (!t) {
+      if (run.logTraces.size >= MAX_LOG_TRACES) return;
+      t = { traceId, firstTs: entry.ts, lastTs: entry.ts, errors: 0, warns: 0, count: 0, source, sample: '' };
+      run.logTraces.set(traceId, t);
+    }
+    t.lastTs = entry.ts;
+    t.count += 1;
+    const bad = ERROR_RE.test(entry.line);
+    if (bad) t.errors += 1;
+    else if (WARN_RE.test(entry.line)) t.warns += 1;
+    if (bad && !t.sampleIsError) {
+      t.sample = entry.line.slice(0, 300);
+      t.sampleIsError = true;
+    } else if (!t.sample) t.sample = entry.line.slice(0, 300);
   }
 
   _setStatus(run, status, exitCode) {
@@ -91,6 +146,7 @@ class RunManager {
       podTailers: [],
       pytestProc: null,
       flowTracker: new ScenarioFlowTracker(),
+      logTraces: new Map(),
       publicConfig: {
         env,
         namespace,

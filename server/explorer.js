@@ -56,6 +56,7 @@ function readFile(relPath) {
     description: s.description || '',
     labels: list(s.labels),
     supportedNamespaces: list(s.supported_namespaces),
+    clearOutput: typeof s.clear_output === 'boolean' ? s.clear_output : undefined,
     sequence: list(s.sequence).map((n) => {
       if (wf.has(n)) return { kind: 'workflow', def: wf.get(n) };
       if (ep.has(n)) return { kind: 'endpoint', def: ep.get(n) };
@@ -211,6 +212,7 @@ function plan({ relPath, scenarios }) {
     }
     const obj = { name: sc.name, supported_namespaces: list(sc.supportedNamespaces), labels: list(sc.labels), sequence: seqNames };
     if (sc.description) obj.description = sc.description;
+    if (typeof sc.clearOutput === 'boolean') obj.clear_output = sc.clearOutput;
     scs.push({ origIndex: isNew ? null : sc.origIndex, obj });
   }
   if (errors.length) return { ok: false, errors };
@@ -219,7 +221,7 @@ function plan({ relPath, scenarios }) {
   const added = { workflows: [], endpoint_interactions: [], scenarios: [] };
   planSection(doc, text, 'workflows', [...wfs.values()], edits, added.workflows);
   planSection(doc, text, 'endpoint_interactions', [...eps.values()], edits, added.endpoint_interactions);
-  planSection(doc, text, 'scenarios', scs, edits, added.scenarios, ['name', 'description', 'supported_namespaces', 'labels', 'sequence']);
+  planSection(doc, text, 'scenarios', scs, edits, added.scenarios, ['name', 'description', 'supported_namespaces', 'labels', 'clear_output', 'sequence']);
 
   let out = text;
   for (const e of edits.sort((a, b) => b.start - a.start)) out = out.slice(0, e.start) + e.text + out.slice(e.end);

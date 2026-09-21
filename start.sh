@@ -71,5 +71,7 @@ for _ in $(seq 1 30); do
     sleep 0.5
 done
 
-echo "Dashboard did not respond to health check in time; check $LOG_FILE" >&2
+echo "Dashboard did not start. Last lines of $LOG_FILE:" >&2
+tail -n 5 "$LOG_FILE" >&2
+rm -f "$PID_FILE"
 exit 1

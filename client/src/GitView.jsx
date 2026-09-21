@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   LuArrowDown,
   LuArrowUp,
@@ -11,6 +11,9 @@ import {
   LuGitBranchPlus,
   LuGitCommitHorizontal,
   LuHistory,
+  LuMinus,
+  LuPlus,
+  LuUpload,
   LuLoader,
   LuPanelLeftClose,
   LuPanelLeftOpen,
@@ -19,9 +22,10 @@ import {
   LuX,
 } from 'react-icons/lu';
 import { api } from './api.js';
-import { Badge, Checkbox, DiffView, EmptyState, Field, IconButton, MenuButton, Modal, Sash, Section, Select, usePanelSize, useLocalState, useToast } from './ui.jsx';
+import { Badge, DiffView, EmptyState, Field, IconButton, MenuButton, Modal, Sash, Section, Select, usePanelSize, useLocalState, useToast } from './ui.jsx';
 
 const STATUS_TONE = { modified: 'M', added: 'A', deleted: 'D', renamed: 'R', untracked: 'U', conflict: '!', copied: 'C', changed: '•' };
+const CODE_TONE = { M: 'modified', A: 'added', D: 'deleted', R: 'renamed', C: 'copied' };
 const BRANCH_RE = /^(?!-)(?!.*\.\.)(?!.*\/\/)[A-Za-z0-9._/-]{1,200}(?<![./])$/;
 
 function NewBranchModal({ current, locals, onClose, onCreate }) {
@@ -75,8 +79,8 @@ export default function GitView({ active }) {
   const [commits, setCommits] = useState([]);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
-  const [selectedFiles, setSelectedFiles] = useState(new Set());
-  const [openFile, setOpenFile] = useState(null);
+  const [openFile, setOpenFile] = useState(null); // { path, staged }
+  const [pushOpen, setPushOpen] = useState(false);
   const [diff, setDiff] = useState('');
   const [diffLoading, setDiffLoading] = useState(false);
   const [message, setMessage] = useState('');
@@ -86,7 +90,6 @@ export default function GitView({ active }) {
   const [sideOpen, setSideOpen] = useLocalState('git.sideOpen', true);
   const [sideW, setSideW, resetSideW] = usePanelSize('git.side', 300, 240, () => Math.min(560, window.innerWidth - 480));
   const [listW, setListW, resetListW] = usePanelSize('git.list', 340, 240, () => Math.min(620, window.innerWidth - 520));
-  const known = useRef(new Set());
 
   const refresh = useCallback(async (quiet) => {
     try {
@@ -95,13 +98,6 @@ export default function GitView({ active }) {
       setBranches(b);
       setCommits(l.commits || []);
       setError('');
-      // new files start selected; the user's own unticking is kept
-      setSelectedFiles((prev) => {
-        const next = new Set();
-        for (const f of s.files) if (prev.has(f.path) || !known.current.has(f.path)) next.add(f.path);
-        known.current = new Set(s.files.map((f) => f.path));
-        return next;
-      });
     } catch (e) {
       setError(e.message);
       if (!quiet) toast(e.message, 'error');
@@ -120,10 +116,11 @@ export default function GitView({ active }) {
     };
   }, [active, refresh]);
 
-  // diff of the open file
+  // diff of the open file: what would be committed (staged) or what is still only in the working copy
+  const fileSig = status?.files.map((f) => `${f.path}:${f.x}${f.y}`).join('|');
   useEffect(() => {
     if (!openFile || !status) return undefined;
-    const f = status.files.find((x) => x.path === openFile);
+    const f = status.files.find((x) => x.path === openFile.path && (openFile.staged ? x.staged : x.unstaged));
     if (!f) {
       setOpenFile(null);
       return undefined;
@@ -131,13 +128,13 @@ export default function GitView({ active }) {
     let cancelled = false;
     setDiffLoading(true);
     api.git
-      .diff(f.path, f.untracked)
+      .diff(f.path, { untracked: f.untracked && !openFile.staged, staged: openFile.staged })
       .then((r) => !cancelled && setDiff(r.diff))
       .catch((e) => !cancelled && setDiff(`# ${e.message}`))
       .finally(() => !cancelled && setDiffLoading(false));
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [openFile, status?.files.map((f) => `${f.path}:${f.x}${f.y}`).join('|')]);
+  }, [openFile, fileSig]);
 
   const run = async (label, fn, okMessage) => {
     setBusy(label);
@@ -162,15 +159,22 @@ export default function GitView({ active }) {
   }, [branches, branchQ]);
 
   const files = status?.files || [];
-  const chosen = files.filter((f) => selectedFiles.has(f.path));
-  const canCommit = chosen.length > 0 && message.trim() && !busy && !status?.detached;
+  const stagedFiles = files.filter((f) => f.staged);
+  const changedFiles = files.filter((f) => f.unstaged);
+  const canCommit = stagedFiles.length > 0 && message.trim() && !busy && !status?.detached;
+  const needsUpstream = !!status && !status.upstream && !status.detached;
+  const canPush = !!status && !status.detached && (status.ahead > 0 || needsUpstream) && !busy;
 
   const commit = async () => {
-    const r = await run('commit', () => api.git.commit(message, chosen.map((f) => f.path)), 'Committed');
+    const r = await run('commit', () => api.git.commit(message), 'Committed');
     if (r) setMessage('');
   };
-
-  const toggleAll = (on) => setSelectedFiles(on ? new Set(files.map((f) => f.path)) : new Set());
+  const stage = (paths) => run('stage', () => api.git.stage(paths));
+  const unstage = (paths) => run('stage', () => api.git.unstage(paths));
+  const push = async () => {
+    setPushOpen(false);
+    await run('push', () => api.git.push(), (r) => r.output.split('\n').filter(Boolean).pop() || 'Pushed');
+  };
 
   return (
     <div className="view">
@@ -202,6 +206,16 @@ export default function GitView({ active }) {
                   )}
                 </div>
                 <div className="git-actions">
+                  <button
+                    type="button"
+                    className="btn sm"
+                    disabled={!canPush}
+                    title={status.detached ? 'Switch to a branch to push' : needsUpstream ? `Push ${status.branch} to origin and set it as the upstream` : status.ahead > 0 ? `Push ${status.ahead} commit${status.ahead === 1 ? '' : 's'} to ${status.upstream}` : 'Nothing to push'}
+                    onClick={() => setPushOpen(true)}
+                  >
+                    {busy === 'push' ? <LuLoader size={13} className="spin" /> : <LuUpload size={13} />} Push
+                    {status.ahead > 0 && <span className="btn-count">{status.ahead}</span>}
+                  </button>
                   <button type="button" className="btn sm" disabled={!!busy} onClick={() => run('fetch', api.git.fetch, 'Fetched from origin')}>
                     {busy === 'fetch' ? <LuLoader size={13} className="spin" /> : <LuCloudDownload size={13} />} Fetch
                   </button>
@@ -312,29 +326,53 @@ export default function GitView({ active }) {
         ) : (
           <div className="git-body">
             <div className="git-files panel" style={{ width: listW }}>
-              <div className="git-files-head">
-                <Checkbox checked={files.length > 0 && chosen.length === files.length} onChange={toggleAll} label={<span className="muted">{chosen.length} of {files.length} selected</span>} />
-              </div>
               <div className="panel-scroll tight">
-                {files.map((f) => (
-                  <div key={f.path} className={`git-file ${openFile === f.path ? 'active' : ''}`} onClick={() => setOpenFile(f.path)}>
-                    <Checkbox checked={selectedFiles.has(f.path)} onChange={(on) => setSelectedFiles((s) => { const n = new Set(s); if (on) n.add(f.path); else n.delete(f.path); return n; })} />
+                <div className="git-group-head">
+                  <span className="git-group-title">Staged changes</span>
+                  <span className="count-pill">{stagedFiles.length}</span>
+                  <span className="spacer" />
+                  <IconButton size="xs" icon={<LuMinus size={13} />} title="Unstage all" disabled={!stagedFiles.length || !!busy} onClick={() => unstage(stagedFiles.map((f) => f.path))} />
+                </div>
+                {stagedFiles.map((f) => (
+                  <div key={`s-${f.path}`} className={`git-file ${openFile?.path === f.path && openFile.staged ? 'active' : ''}`} onClick={() => setOpenFile({ path: f.path, staged: true })}>
                     <span className="git-file-text" title={f.path}>
                       <span className="git-file-name">{f.path.split('/').pop()}</span>
                       <span className="git-file-dir">{f.path.split('/').slice(0, -1).join('/')}</span>
                     </span>
-                    <span className={`git-badge s-${f.status}`} title={f.status}>{STATUS_TONE[f.status] || '•'}</span>
+                    <span className="git-file-actions"><IconButton size="xs" icon={<LuMinus size={13} />} title="Unstage this file" disabled={!!busy} onClick={(e) => { e.stopPropagation(); unstage([f.path]); }} /></span>
+                    <span className={`git-badge s-${CODE_TONE[f.x] || 'changed'}`} title={CODE_TONE[f.x] || 'changed'}>{f.x === ' ' ? '•' : f.x}</span>
                   </div>
                 ))}
-                {!files.length && <div className="list-hint pad">Working tree clean — nothing to commit.</div>}
+                {!stagedFiles.length && <div className="list-hint pad">Nothing staged yet. Stage the files you want in the next commit with the + button.</div>}
+
+                <div className="git-group-head">
+                  <span className="git-group-title">Changes</span>
+                  <span className="count-pill">{changedFiles.length}</span>
+                  <span className="spacer" />
+                  <IconButton size="xs" icon={<LuPlus size={13} />} title="Stage all" disabled={!changedFiles.length || !!busy} onClick={() => stage(changedFiles.map((f) => f.path))} />
+                </div>
+                {changedFiles.map((f) => {
+                  const tone = f.untracked ? 'untracked' : CODE_TONE[f.y] || 'changed';
+                  return (
+                    <div key={`u-${f.path}`} className={`git-file ${openFile?.path === f.path && !openFile.staged ? 'active' : ''}`} onClick={() => setOpenFile({ path: f.path, staged: false })}>
+                      <span className="git-file-text" title={f.path}>
+                        <span className="git-file-name">{f.path.split('/').pop()}</span>
+                        <span className="git-file-dir">{f.path.split('/').slice(0, -1).join('/')}</span>
+                      </span>
+                      <span className="git-file-actions"><IconButton size="xs" icon={<LuPlus size={13} />} title="Stage this file" disabled={!!busy} onClick={(e) => { e.stopPropagation(); stage([f.path]); }} /></span>
+                      <span className={`git-badge s-${tone}`} title={tone}>{STATUS_TONE[tone] || '•'}</span>
+                    </div>
+                  );
+                })}
+                {!changedFiles.length && !stagedFiles.length && <div className="list-hint pad">Working tree clean — nothing to commit.</div>}
               </div>
               <div className="git-commit">
-                <textarea className="input textarea" rows={3} value={message} onChange={(e) => setMessage(e.target.value)} placeholder={`Commit message (${status.branch})`} />
-                <button type="button" className="btn primary block" disabled={!canCommit} onClick={commit}>
+                <textarea className="input textarea" rows={3} value={message} onChange={(e) => setMessage(e.target.value)} placeholder={`Commit message (${status.branch})`} onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && canCommit) commit(); }} />
+                <button type="button" className="btn primary block" disabled={!canCommit} onClick={commit} title="Commit the staged files (Ctrl/⌘ Enter)">
                   {busy === 'commit' ? <LuLoader size={14} className="spin" /> : <LuGitCommitHorizontal size={14} />}
-                  Commit {chosen.length > 0 ? `${chosen.length} file${chosen.length === 1 ? '' : 's'}` : ''}
+                  Commit {stagedFiles.length > 0 ? `${stagedFiles.length} staged file${stagedFiles.length === 1 ? '' : 's'}` : ''}
                 </button>
-                <div className="field-hint">Only the ticked files are committed. Nothing is pushed.</div>
+                <div className="field-hint">Only staged files are committed. Use Push to send commits to origin.</div>
               </div>
               <Sash edge="end" size={listW} onSize={setListW} onReset={resetListW} />
             </div>
@@ -344,7 +382,8 @@ export default function GitView({ active }) {
                 <>
                   <div className="git-diff-head">
                     <LuFileDiff size={15} className="muted" />
-                    <span className="mono ellipsis">{openFile}</span>
+                    <span className="mono ellipsis">{openFile.path}</span>
+                    <Badge>{openFile.staged ? 'staged' : 'working copy'}</Badge>
                     <span className="spacer" />
                     {diffLoading && <LuLoader size={14} className="spin muted" />}
                     <IconButton size="sm" icon={<LuX size={15} />} title="Close diff" onClick={() => setOpenFile(null)} />
@@ -353,7 +392,7 @@ export default function GitView({ active }) {
                 </>
               ) : (
                 <EmptyState icon={<LuFileDiff size={26} />} title="Select a file to see its diff">
-                  Diffs are the real unified YAML diff against the last commit.
+                  Staged files show what will be committed; other changes show what differs from the index.
                 </EmptyState>
               )}
             </div>
@@ -361,6 +400,31 @@ export default function GitView({ active }) {
         )}
       </section>
 
+      {pushOpen && status && (
+        <Modal
+          title="Push to origin"
+          icon={<LuUpload size={16} />}
+          width={480}
+          onClose={() => setPushOpen(false)}
+          footer={
+            <>
+              <button type="button" className="btn" onClick={() => setPushOpen(false)}>Cancel</button>
+              <button type="button" className="btn primary" onClick={push}><LuUpload size={14} /> Push</button>
+            </>
+          }
+        >
+          <div className="stack">
+            <div>
+              {needsUpstream ? (
+                <>Push <span className="mono">{status.branch}</span> to a new branch <span className="mono">origin/{status.branch}</span> and track it.</>
+              ) : (
+                <>Push {status.ahead} commit{status.ahead === 1 ? '' : 's'} on <span className="mono">{status.branch}</span> to <span className="mono">{status.upstream}</span>.</>
+              )}
+            </div>
+            <div className="muted">This is a normal push: it never forces, so it stops if origin has commits you don't have.</div>
+          </div>
+        </Modal>
+      )}
       {newBranch && status && (
         <NewBranchModal
           current={status.branch.startsWith('HEAD') ? branches.local[0]?.name : status.branch}
