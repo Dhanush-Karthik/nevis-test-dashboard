@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { LuArrowDownToLine, LuClock, LuDownload, LuExpand, LuFilter, LuRegex, LuSearch, LuSquareArrowOutUpRight, LuTerminal, LuWrapText, LuX, LuCheck } from 'react-icons/lu';
+import { LuArrowDownToLine, LuClock, LuDownload, LuExpand, LuFilter, LuRegex, LuSearch, LuSquareArrowOutUpRight, LuCode, LuWrapText, LuX } from 'react-icons/lu';
 import { api } from './api.js';
 import { linkifyLine, useTraceLinks } from './tracing.jsx';
-import { DateTimeField, EmptyState, IconButton, MenuButton, Modal, Segmented, Select, toLocalValue, useLocalState, useToast } from './ui.jsx';
+import { DateTimeField, EmptyState, IconButton, Modal, Segmented, Select, toLocalValue, useToast } from './ui.jsx';
 
 const LEVEL_RE = /\b(TRACE|DEBUG|INFO|WARN(?:ING)?|ERROR|FATAL)\b/i;
 
@@ -17,8 +17,6 @@ const LEVELS = ['ALL', 'ERROR', 'WARN', 'INFO', 'DEBUG', 'TRACE', 'FATAL'].map((
 const logText = (entries) => entries.map((e) => `${new Date(e.ts).toISOString()} ${e.line}`).join('\n');
 const safeName = (s) => s.replace(/[^a-z0-9._-]/gi, '_');
 
-let idePromise = null;
-const loadIdes = () => (idePromise ||= api.ides().then((r) => r.ides).catch(() => [{ id: 'default', label: 'System default editor' }]));
 
 function LogLine({ entry, level, onShowContext, pinned, onLinkOpen }) {
   const rootLinks = useTraceLinks();
@@ -78,17 +76,11 @@ export default function LogPanel({ title, entries, onPopout }) {
   const [autoscroll, setAutoscroll] = useState(true);
   const [wrap, setWrap] = useState(false);
   const [contextEntry, setContextEntry] = useState(null);
-  const [ides, setIdes] = useState([]);
-  const [lastIde, setLastIde] = useLocalState('lastIde', 'default');
   const [pinnedKey, setPinnedKey] = useState(null);
   const bottomRef = useRef(null);
   const onLinkOpen = useCallback((entry) => {
     setAutoscroll(false);
     setPinnedKey(`${entry.source}:${entry.seq}`);
-  }, []);
-
-  useEffect(() => {
-    loadIdes().then(setIdes);
   }, []);
 
   const matcher = useMemo(() => {
@@ -134,15 +126,14 @@ export default function LogPanel({ title, entries, onPopout }) {
     URL.revokeObjectURL(url);
   };
 
-  const openInIde = async (ide) => {
+  const openInVsCode = async () => {
     if (!filtered.length) {
       toast('Nothing to open — no log lines match the current filters', 'info');
       return;
     }
     try {
-      await api.openLog({ ide, name: safeName(title), content: logText(filtered) });
-      setLastIde(ide);
-      toast(`Opened ${filtered.length.toLocaleString()} lines in ${ides.find((i) => i.id === ide)?.label || 'the editor'}`);
+      await api.openLog({ ide: 'vscode', name: safeName(title), content: logText(filtered) });
+      toast(`Opened ${filtered.length.toLocaleString()} lines in VS Code`);
     } catch (err) {
       toast(err.message, 'error');
     }
@@ -183,21 +174,10 @@ export default function LogPanel({ title, entries, onPopout }) {
         <IconButton size="md" icon={<LuArrowDownToLine size={15} />} title="Auto-scroll to newest" active={autoscroll} onClick={() => setAutoscroll((v) => !v)} />
         <IconButton size="md" icon={<LuDownload size={15} />} title="Download as .log file" onClick={download} />
         {onPopout && <IconButton size="md" icon={<LuSquareArrowOutUpRight size={15} />} title="Open these logs in a separate window (keeps streaming live)" onClick={onPopout} />}
-        <MenuButton
-          className="btn sm"
-          icon={<LuTerminal size={14} />}
-          label="Open in IDE"
-          title="Open the (filtered) logs in your editor"
-          items={[
-            { key: 'h', heading: 'Open filtered logs in' },
-            ...ides.map((i) => ({
-              key: i.id,
-              label: i.label,
-              hint: i.id === lastIde ? <LuCheck size={13} /> : undefined,
-              onClick: () => openInIde(i.id),
-            })),
-          ]}
-        />
+        <button type="button" className="btn sm" onClick={openInVsCode} title="Open the (filtered) logs in VS Code">
+          <LuCode size={14} />
+          <span>Open in VS Code</span>
+        </button>
       </div>
 
       {(showTime || timeActive) && (

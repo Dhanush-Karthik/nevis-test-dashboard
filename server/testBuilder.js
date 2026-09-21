@@ -166,14 +166,26 @@ function loadAllDefinitions() {
     }
     if (!doc) continue;
     const rel = path.relative(REPO_ROOT, file);
+    // labels of the scenarios (in this file) that use a block: lets the library be searched by label
+    const usage = new Map();
+    for (const sc of Array.isArray(doc.scenarios) ? doc.scenarios : []) {
+      const lbls = (Array.isArray(sc && sc.labels) ? sc.labels : []).map(String).filter((l) => !UUID_RE.test(l));
+      for (const n of Array.isArray(sc && sc.sequence) ? sc.sequence : []) {
+        const set = usage.get(n) || usage.set(n, new Set()).get(n);
+        lbls.forEach((l) => set.add(l));
+      }
+    }
     for (const [list, map, kind] of [[doc.workflows, workflows, 'workflow'], [doc.endpoint_interactions, endpoints, 'endpoint']]) {
       for (const def of Array.isArray(list) ? list : []) {
         if (!def || typeof def !== 'object' || typeof def.name !== 'string') continue;
         const sig = JSON.stringify(def);
         const key = `${def.name} ${sig}`;
         const existing = map.get(key);
-        if (existing) existing.count += 1;
-        else map.set(key, { kind, name: def.name, source: rel, count: 1, def });
+        const lbls = usage.get(def.name) || new Set();
+        if (existing) {
+          existing.count += 1;
+          lbls.forEach((l) => existing.labels.add(l));
+        } else map.set(key, { kind, name: def.name, source: rel, count: 1, def, labels: new Set(lbls) });
       }
     }
   }
@@ -369,7 +381,7 @@ function getSchema() {
 
 function getCatalogPayload() {
   const { workflows, endpoints } = getCatalog();
-  const slim = (x) => ({ kind: x.kind, name: x.name, source: x.source, count: x.count, def: x.def });
+  const slim = (x) => ({ kind: x.kind, name: x.name, source: x.source, count: x.count, def: x.def, labels: [...x.labels].sort() });
   return { workflows: workflows.map(slim), endpoints: endpoints.map(slim) };
 }
 
@@ -518,7 +530,8 @@ function insertIntoSection(text, key, itemsText, title) {
     const m = lines[i].match(re);
     if (!m) continue;
     const rest = m[1].trim();
-    if (rest && !rest.startsWith('#')) throw new Error(`"${key}:" uses an inline value in that file - add to it by hand.`);
+    if (rest === '[]') lines[i] = `${key}:`; // an empty list written inline: turn it into a block list to add to
+    else if (rest && !rest.startsWith('#')) throw new Error(`"${key}:" uses an inline value in that file - add to it by hand.`);
     keyIdx = i;
     break;
   }

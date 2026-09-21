@@ -8,23 +8,57 @@
 const fs = require('fs');
 const path = require('path');
 const YAML = require('yaml');
-const { findConfigFiles } = require('./scenarioCatalog');
+const { findConfigFiles, SEARCH_DIRS } = require('./scenarioCatalog');
 const { insertIntoSection, itemsBlock } = require('./testBuilder');
 const git = require('./git');
 
 const { REPO_ROOT } = require('./paths');
 const rel = (abs) => path.relative(REPO_ROOT, abs);
 
+// Folders the explorer shows: the ones pytest reads scenario files from (it globs *.yaml directly inside each),
+// plus any folder made under config/ (config/defaults and config/fixtures hold other kinds of YAML and are left out).
+// Files in the second kind are editable here but pytest does not read them until they are moved into a pytest folder.
+const EXCLUDED_DIRS = new Set(['config/defaults', 'config/fixtures']);
+const CONFIG_ROOT = path.join(REPO_ROOT, 'config');
+
+function allDirs() {
+  const out = new Set(SEARCH_DIRS.filter((d) => fs.existsSync(path.join(REPO_ROOT, d))));
+  const walk = (abs) => {
+    for (const e of fs.readdirSync(abs, { withFileTypes: true })) {
+      if (!e.isDirectory() || e.name.startsWith('.') || e.name === '__pycache__') continue;
+      const child = path.join(abs, e.name);
+      const r = rel(child);
+      if (EXCLUDED_DIRS.has(r)) continue;
+      out.add(r);
+      walk(child);
+    }
+  };
+  if (fs.existsSync(CONFIG_ROOT)) walk(CONFIG_ROOT);
+  return [...out].sort();
+}
+const scenarioDirs = () => ({ dirs: allDirs(), unscanned: allDirs().filter((d) => !SEARCH_DIRS.includes(d)) });
+
+function explorerFiles() {
+  const files = new Set(findConfigFiles());
+  for (const d of allDirs()) {
+    const abs = path.join(REPO_ROOT, d);
+    for (const e of fs.readdirSync(abs, { withFileTypes: true })) {
+      if (e.isFile() && e.name.endsWith('.yaml') && !e.name.startsWith('zz_dashboard_draft_')) files.add(path.join(abs, e.name));
+    }
+  }
+  return [...files];
+}
+
 function resolveFile(relPath) {
   const abs = path.resolve(REPO_ROOT, relPath || '');
-  return findConfigFiles().includes(abs) ? abs : null;
+  return explorerFiles().includes(abs) ? abs : null;
 }
 
 const list = (v) => (Array.isArray(v) ? v : []);
 
 function tree() {
   const files = [];
-  for (const abs of findConfigFiles()) {
+  for (const abs of explorerFiles()) {
     let doc;
     try {
       doc = YAML.parse(fs.readFileSync(abs, 'utf8'));
@@ -40,6 +74,102 @@ function tree() {
     });
   }
   return files.sort((a, b) => a.relPath.localeCompare(b.relPath));
+}
+
+const NEW_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const SKELETON = 'workflows: []\n\nendpoint_interactions: []\n\nscenarios: []\n';
+
+function checkDir(dir) {
+  const clean = String(dir || '').replace(/\/+$/, '');
+  if (!allDirs().includes(clean)) throw new Error(`"${clean}" is not a folder of the explorer (it must be under config/).`);
+  return { clean, abs: path.join(REPO_ROOT, clean) };
+}
+
+const baseName = (name) => String(name || '').trim().replace(/\.ya?ml$/i, '');
+function checkName(base) {
+  if (!NEW_NAME_RE.test(base) || base.length > 80) throw new Error('Name: letters, digits, "-", "_" and "." only, starting with a letter or digit.');
+}
+
+// New, empty test file (the explorer's "New file"): never overwrites.
+function createFile({ dir, name }) {
+  const { clean, abs } = checkDir(dir);
+  const base = baseName(name);
+  checkName(base);
+  const target = path.join(abs, `${base}.yaml`);
+  if (fs.existsSync(target)) throw new Error(`${clean}/${base}.yaml already exists.`);
+  fs.writeFileSync(target, SKELETON, { flag: 'wx' });
+  return { relPath: rel(target) };
+}
+
+// New folder under config/. pytest only reads the folders it lists, so files in a new one are not run until moved.
+function createFolder({ parent, name }) {
+  const { clean, abs } = checkDir(parent);
+  const n = String(name || '').trim();
+  checkName(n);
+  const target = path.join(abs, n);
+  if (fs.existsSync(target)) throw new Error(`${clean}/${n} already exists.`);
+  fs.mkdirSync(target);
+  return { path: rel(target), scanned: SEARCH_DIRS.includes(rel(target)) };
+}
+
+// Duplicate a file next to the original as "<name>-copy.yaml" (then "-copy-2", ...). Scenario uuid labels are
+// regenerated, because a label picks tests by uuid and two files sharing one would both run.
+function copyFile({ from }) {
+  const src = resolveFile(from);
+  if (!src) throw new Error('not a scenario file');
+  const dir = path.dirname(src);
+  const stem = path.basename(src, '.yaml');
+  let target;
+  for (let n = 1; ; n += 1) {
+    target = path.join(dir, `${stem}-copy${n > 1 ? `-${n}` : ''}.yaml`);
+    if (!fs.existsSync(target)) break;
+  }
+  const uuids = new Map();
+  const text = fs.readFileSync(src, 'utf8').replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, (u) => {
+    if (!uuids.has(u.toLowerCase())) uuids.set(u.toLowerCase(), require('crypto').randomUUID());
+    return uuids.get(u.toLowerCase());
+  });
+  fs.writeFileSync(target, text, { flag: 'wx' });
+  return { relPath: rel(target), newLabels: uuids.size };
+}
+
+function renameFile({ from, name }) {
+  const src = resolveFile(from);
+  if (!src) throw new Error('not a scenario file');
+  const base = baseName(name);
+  checkName(base);
+  const target = path.join(path.dirname(src), `${base}.yaml`);
+  if (target === src) return { relPath: rel(src), renamed: false };
+  if (fs.existsSync(target)) throw new Error(`${base}.yaml already exists in that folder.`);
+  fs.renameSync(src, target);
+  return { relPath: rel(target), renamed: true };
+}
+
+// Deletes a scenario file, or an EMPTY folder that is not one pytest itself reads. Nothing recursive.
+function deleteEntry({ path: p, kind }) {
+  if (kind === 'folder') {
+    const { clean, abs } = checkDir(p);
+    if (SEARCH_DIRS.includes(clean)) throw new Error(`${clean} is a folder pytest reads from and cannot be deleted here.`);
+    if (fs.readdirSync(abs).length) throw new Error(`${clean} is not empty.`);
+    fs.rmdirSync(abs);
+    return { deleted: clean };
+  }
+  const src = resolveFile(p);
+  if (!src) throw new Error('not a scenario file');
+  fs.unlinkSync(src);
+  return { deleted: rel(src) };
+}
+
+// Drag & drop in the explorer: move a scenario file to another folder.
+function moveFile({ from, toDir }) {
+  const src = resolveFile(from);
+  if (!src) throw new Error('not a scenario file');
+  const { clean, abs } = checkDir(toDir);
+  if (path.dirname(src) === abs) return { relPath: rel(src), moved: false };
+  const target = path.join(abs, path.basename(src));
+  if (fs.existsSync(target)) throw new Error(`${clean} already has a file named ${path.basename(src)}.`);
+  fs.renameSync(src, target);
+  return { relPath: rel(target), moved: true };
 }
 
 function readFile(relPath) {
@@ -256,4 +386,4 @@ function save(payload) {
   return { ok: true, relPath: p.relPath, changed: p.changed, counts: p.counts };
 }
 
-module.exports = { tree, readFile, preview, save };
+module.exports = { tree, scenarioDirs, createFile, createFolder, copyFile, renameFile, deleteEntry, moveFile, readFile, preview, save };

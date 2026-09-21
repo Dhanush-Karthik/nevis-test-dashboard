@@ -20,9 +20,18 @@ function post(url, body) {
   }).then(j);
 }
 
+// git operations change what the sidebar badge counts: tell the app to look again
+const gitChanged = (p) => p.then((r) => { window.dispatchEvent(new Event('nevis-git-changed')); return r; });
+
 export const api = {
   explorer: {
     tree: () => fetch(`${BASE}/api/explorer/tree`).then(j),
+    create: (dir, name) => post('/api/explorer/create', { dir, name }),
+    folder: (parent, name) => post('/api/explorer/folder', { parent, name }),
+    copy: (from) => post('/api/explorer/copy', { from }),
+    rename: (from, name) => post('/api/explorer/rename', { from, name }),
+    remove: (path, kind) => post('/api/explorer/delete', { path, kind }),
+    move: (from, toDir) => post('/api/explorer/move', { from, toDir }),
     file: (path) => fetch(`${BASE}/api/explorer/file?path=${encodeURIComponent(path)}`).then(j),
     preview: (payload) => fetch(`${BASE}/api/explorer/preview`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }).then((r) => r.json()),
     save: (payload) => fetch(`${BASE}/api/explorer/save`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }).then((r) => r.json()),
@@ -32,14 +41,14 @@ export const api = {
     branches: () => fetch(`${BASE}/api/git/branches`).then(j),
     log: () => fetch(`${BASE}/api/git/log?limit=30`).then(j),
     diff: (path, { untracked, staged } = {}) => fetch(`${BASE}/api/git/diff?path=${encodeURIComponent(path)}${untracked ? '&untracked=1' : ''}${staged ? '&staged=1' : ''}`).then(j),
-    stage: (paths) => post('/api/git/stage', { paths }),
-    unstage: (paths) => post('/api/git/unstage', { paths }),
-    push: () => post('/api/git/push', {}),
-    checkout: (branch) => post('/api/git/checkout', { branch }),
+    stage: (paths) => gitChanged(post('/api/git/stage', { paths })),
+    unstage: (paths) => gitChanged(post('/api/git/unstage', { paths })),
+    push: () => gitChanged(post('/api/git/push', {})),
+    checkout: (branch) => gitChanged(post('/api/git/checkout', { branch })),
     createBranch: (name, from) => post('/api/git/branch', { name, from }),
     fetch: () => post('/api/git/fetch', {}),
-    pull: (strategy) => post('/api/git/pull', { strategy }),
-    commit: (message) => post('/api/git/commit', { message }),
+    pull: (strategy) => gitChanged(post('/api/git/pull', { strategy })),
+    commit: (message) => gitChanged(post('/api/git/commit', { message })),
   },
   tracing: {
     status: () => fetch(`${BASE}/api/tracing/status`).then(j),
@@ -59,6 +68,8 @@ export const api = {
   runs: () => fetch(`${BASE}/api/runs`).then(j),
   run: (id) => fetch(`${BASE}/api/runs/${id}`).then(j),
   startRun: (config) => post('/api/runs', config),
+  removeRun: (id) => fetch(`${BASE}/api/runs/${id}`, { method: 'DELETE' }).then(j),
+  clearRuns: () => post('/api/runs/clear', {}),
   stopRun: (id) => fetch(`${BASE}/api/runs/${id}/stop`, { method: 'POST' }).then(j),
   scenarios: {
     labels: () => fetch(`${BASE}/api/scenarios/labels`).then(j),

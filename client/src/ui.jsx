@@ -281,6 +281,54 @@ export function MenuButton({ label, icon, items, title, align = 'end', className
   );
 }
 
+/* Right-click menu at a screen position. items: same shape as MenuButton's (separator / heading / label / icon / hint / danger). */
+export function ContextMenu({ x, y, items, onClose }) {
+  const ref = useRef(null);
+  const [pos, setPos] = useState({ left: x, top: y });
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    setPos({ left: Math.max(4, Math.min(x, window.innerWidth - r.width - 4)), top: Math.max(4, Math.min(y, window.innerHeight - r.height - 4)) });
+  }, [x, y]);
+  useEffect(() => {
+    const away = (e) => { if (!ref.current || !ref.current.contains(e.target)) onClose(); };
+    const key = (e) => e.key === 'Escape' && onClose();
+    window.addEventListener('mousedown', away, true);
+    window.addEventListener('contextmenu', away, true);
+    window.addEventListener('keydown', key);
+    window.addEventListener('blur', onClose);
+    window.addEventListener('resize', onClose);
+    return () => {
+      window.removeEventListener('mousedown', away, true);
+      window.removeEventListener('contextmenu', away, true);
+      window.removeEventListener('keydown', key);
+      window.removeEventListener('blur', onClose);
+      window.removeEventListener('resize', onClose);
+    };
+  }, [onClose]);
+  return createPortal(
+    <div ref={ref} className="ctx-menu menu-list" style={pos} onContextMenu={(e) => e.preventDefault()}>
+      {items.map((it) =>
+        it.separator ? (
+          <div key={it.key} className="menu-sep" />
+        ) : (
+          <div
+            key={it.key}
+            className={`menu-item ${it.disabled ? 'disabled' : ''} ${it.danger ? 'danger' : ''}`}
+            onClick={() => { if (it.disabled) return; onClose(); it.onClick(); }}
+          >
+            {it.icon && <span className="menu-item-icon">{it.icon}</span>}
+            <span className="menu-item-label">{it.label}</span>
+            {it.hint && <span className="menu-item-hint">{it.hint}</span>}
+          </div>
+        )
+      )}
+    </div>,
+    document.body
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /* Combobox: free text input with suggestions (replaces <datalist>)     */
 /* ------------------------------------------------------------------ */
@@ -641,20 +689,30 @@ export const useToast = () => useContext(ToastCtx);
 
 export function ToastProvider({ children }) {
   const [toasts, setToasts] = useState([]);
-  const push = useCallback((message, tone = 'ok') => {
+  // opts: { onClick } makes the toast clickable (it closes and runs onClick); { duration } overrides the 3.6 s default.
+  const push = useCallback((message, tone = 'ok', opts = {}) => {
     const id = Math.random().toString(36).slice(2);
-    setToasts((t) => [...t, { id, message, tone }]);
-    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3600);
+    setToasts((t) => [...t, { id, message, tone, onClick: opts.onClick, sub: opts.sub }]);
+    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), opts.duration || 3600);
   }, []);
+  const dismiss = (id) => setToasts((t) => t.filter((x) => x.id !== id));
   return (
     <ToastCtx.Provider value={push}>
       {children}
       {createPortal(
         <div className="toasts">
           {toasts.map((t) => (
-            <div key={t.id} className={`toast toast-${t.tone}`}>
+            <div
+              key={t.id}
+              className={`toast toast-${t.tone} ${t.onClick ? 'clickable' : ''}`}
+              role={t.onClick ? 'button' : undefined}
+              onClick={t.onClick ? () => { dismiss(t.id); t.onClick(); } : undefined}
+            >
               {t.tone === 'ok' ? <LuCircleCheck size={15} /> : t.tone === 'error' ? <LuCircleX size={15} /> : <LuInfo size={15} />}
-              <span>{t.message}</span>
+              <span className="toast-text">
+                {t.message}
+                {t.sub && <span className="toast-sub">{t.sub}</span>}
+              </span>
             </div>
           ))}
         </div>,

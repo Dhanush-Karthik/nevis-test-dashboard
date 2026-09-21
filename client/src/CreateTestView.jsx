@@ -4,10 +4,11 @@ import ScenarioFlow from './ScenarioFlow.jsx';
 import LogPanel from './LogPanel.jsx';
 import { TracesPanel, TraceSheet, TraceLinkContext, useRunTraces } from './tracing.jsx';
 import FileTree from './FileTree.jsx';
+import PodPicker, { podsFromKeys } from './PodPicker.jsx';
 import { openPopout, setActiveRun, shortcutLabel } from './popout.js';
 import {
   LuChevronDown, LuChevronRight, LuCircleAlert, LuCog, LuLayoutGrid, LuLoader, LuMaximize2, LuMinimize2, LuPanelBottomClose, LuPanelLeftClose,
-  LuPanelLeftOpen, LuPanelRightClose, LuPanelRightOpen, LuPlay, LuPlug, LuPlus, LuRefreshCw, LuSave, LuSearch, LuTrash2, LuX, LuCheck, LuWorkflow, LuBlocks, LuLibrary, LuFolderTree, LuUndo2, LuCode, LuCopy, LuChevronLeft, LuSquareArrowOutUpRight,
+  LuInfo, LuPanelLeftOpen, LuSlidersHorizontal, LuPlay, LuPlug, LuPlus, LuRefreshCw, LuSave, LuSearch, LuTrash2, LuX, LuCheck, LuWorkflow, LuBlocks, LuLibrary, LuFolderTree, LuUndo2, LuCode, LuCopy, LuChevronLeft, LuSquareArrowOutUpRight,
 } from 'react-icons/lu';
 import {
   Badge, Checkbox, Combobox, DiffView, EmptyState, Field, IconButton, Modal, Sash, Section, Segmented, Select, StatusDot, Switch, useLocalState, usePanelSize, useToast,
@@ -21,10 +22,20 @@ const CANVAS_PAD = 140; // free space kept around the outermost block; the board
 // Starter blocks for "build it from scratch". Deliberately minimal - anything
 // not set falls back to config/defaults/*.yaml exactly like hand-written cases.
 const TEMPLATES = [
-  { id: 'register-user', kind: 'workflow', title: 'Register user', hint: 'flow: register-user', def: { name: 'register-user', flow: 'register-user', method_ident: 'four-fields', reset_email: true, reset_online_id: true, expected_tokens: ['access-token'] } },
-  { id: 'login', kind: 'workflow', title: 'Login', hint: 'flow: login', def: { name: 'login', flow: 'login', method_auth: 'fido-pin', expected_tokens: ['access-token'] } },
-  { id: 'register-device', kind: 'workflow', title: 'Register device', hint: 'flow: register-device', def: { name: 'register-device', flow: 'register-device', method_ident: 'four-fields', device_registration_case: 'new_device', expected_tokens: ['access-token'] } },
-  { id: 'endpoint', kind: 'endpoint', title: 'Endpoint interaction', hint: 'single HTTP call', def: { name: 'endpoint-call', host: 'idp', endpoint: '/', method: 'GET', auth_config: { type: 'none' }, expected_status_code: 200 } },
+  { id: 'register-user', group: 'Workflows', kind: 'workflow', title: 'Register user', hint: 'four-fields', def: { name: 'register-user', flow: 'register-user', method_ident: 'four-fields', reset_email: true, reset_online_id: true, expected_tokens: ['access-token'] } },
+  { id: 'register-user-egk', group: 'Workflows', kind: 'workflow', title: 'Register user (EGK)', hint: 'method_ident: egk', def: { name: 'register-user-egk', flow: 'register-user', method_ident: 'egk', method_auth: 'egk', reset_kvnr: true, reset_email: true, expected_tokens: ['access-token'] } },
+  { id: 'register-user-fake', group: 'Workflows', kind: 'workflow', title: 'Register user (fake-auth)', hint: 'method_ident: fake-auth', def: { name: 'register-user-fake-auth', flow: 'register-user', method_ident: 'fake-auth', reset_kvnr: true, reset_email: true, expected_tokens: ['access-token'] } },
+  { id: 'login', group: 'Workflows', kind: 'workflow', title: 'Login (FIDO PIN)', hint: 'method_auth: fido-pin', def: { name: 'login', flow: 'login', method_auth: 'fido-pin', expected_tokens: ['access-token'] } },
+  { id: 'login-egk', group: 'Workflows', kind: 'workflow', title: 'Login (EGK)', hint: 'method_auth: egk', def: { name: 'login-egk', flow: 'login', method_auth: 'egk', expected_tokens: ['access-token'] } },
+  { id: 'login-stepup-eid', group: 'Workflows', kind: 'workflow', title: 'Step-up login (eID)', hint: 'method_ident: eid', def: { name: 'stepup-eid', flow: 'login', method_ident: 'eid', eid_card: 'user_matching', acr_values: 'gematik-ehealth-loa-high', expected_tokens: ['access-token'] } },
+  { id: 'register-device', group: 'Workflows', kind: 'workflow', title: 'Register device', hint: 'new device, four-fields', def: { name: 'register-device', flow: 'register-device', method_ident: 'four-fields', device_registration_case: 'new_device', expected_tokens: ['access-token'] } },
+  { id: 'register-device-otp', group: 'Workflows', kind: 'workflow', title: 'Register device (OTP)', hint: 'forgot PIN, method_ident: otp', def: { name: 'device-registration-otp', flow: 'register-device', method_ident: 'otp', device_registration_case: 'forgot_pin', expected_tokens: ['access-token'] } },
+  { id: 'endpoint', group: 'Endpoints', kind: 'endpoint', title: 'Endpoint interaction', hint: 'single HTTP call', def: { name: 'endpoint-call', host: 'idp', endpoint: '/', method: 'GET', auth_config: { type: 'none' }, expected_status_code: 200 } },
+  { id: 'ep-change-email', group: 'Endpoints', kind: 'endpoint', title: 'Change email', hint: 'POST /change-email', def: { name: 'change-email', host: 'idp', endpoint: '/change-email', method: 'POST', auth_config: { type: 'token' }, expected_status_code: 200 } },
+  { id: 'ep-introspect', group: 'Endpoints', kind: 'endpoint', title: 'Introspect access token', hint: 'POST /oauth/introspect', def: { name: 'introspect-access-token', host: 'idbroker', endpoint: '/oauth/introspect', method: 'POST', auth_config: { type: 'none' }, headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: { token: '<file:output/access_token>' }, expected_status_code: 200 } },
+  { id: 'ep-revoke', group: 'Endpoints', kind: 'endpoint', title: 'Revoke access token', hint: 'POST /oauth/revoke', def: { name: 'revoke-access-token', host: 'idbroker', endpoint: '/oauth/revoke', method: 'POST', store_session: true, auth_config: { type: 'none' }, headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: { token: '<file:output/access_token>' }, expected_status_code: 200 } },
+  { id: 'ep-backend-token', group: 'Endpoints', kind: 'endpoint', title: 'Backend token', hint: 'GET /backend/token', def: { name: 'backend-token', host: 'idp', endpoint: '/backend/token', method: 'GET', auth_config: { type: 'basic', user: 'adapter' }, cert_config: { user: 'adapter' }, expected_status_code: 200 } },
+  { id: 'ep-ident-cases', group: 'Endpoints', kind: 'endpoint', title: 'Ident cases', hint: 'GET /ident-cases', def: { name: 'ident-cases', host: 'idp', endpoint: '/ident-cases', method: 'GET', auth_config: { type: 'token' }, expected_status_code: 200 } },
 ];
 
 const uid = () => Math.random().toString(36).slice(2, 9);
@@ -77,7 +88,7 @@ function computeSequence(sc) {
   return { order: problems.length ? [] : order, problems };
 }
 
-function ChipsInput({ value, onChange, suggestions = [], placeholder }) {
+function ChipsInput({ value, onChange, suggestions = [], placeholder, invalid }) {
   const [text, setText] = useState('');
   const add = (raw) => {
     const v = raw.trim();
@@ -86,7 +97,7 @@ function ChipsInput({ value, onChange, suggestions = [], placeholder }) {
   };
   const rest = suggestions.filter((x) => !value.includes(x));
   return (
-    <div className="chips">
+    <div className={`chips ${invalid ? 'invalid' : ''}`}>
       {value.map((v, i) => (
         <span className="chip" key={`${v}-${i}`}>
           {String(v)}
@@ -519,7 +530,9 @@ function summarizeDef(def) {
     .map(([k, v]) => [k, typeof v === 'object' ? JSON.stringify(v) : String(v)]);
 }
 
-function LibraryRow({ item, expanded, onToggle, onAdd, onDragStart }) {
+function LibraryRow({ item, expanded, onToggle, onAdd, onDragStart, query = '' }) {
+  const needle = query.trim().toLowerCase();
+  const hitLabels = needle ? (item.labels || []).filter((l) => l.toLowerCase().includes(needle)) : [];
   const chips =
     item.kind === 'workflow'
       ? [item.def.flow, item.def.method_ident || item.def.method_auth].filter(Boolean)
@@ -536,6 +549,12 @@ function LibraryRow({ item, expanded, onToggle, onAdd, onDragStart }) {
             ))}
             {item.kind === 'endpoint' && item.def.endpoint && <span className="lib-path mono">{item.def.endpoint}</span>}
           </div>
+          {hitLabels.length > 0 && (
+            <div className="lib-row-chips">
+              {hitLabels.slice(0, 3).map((l) => <span key={l} className="chip-tag label" title="A scenario using this block has this label">{l}</span>)}
+              {hitLabels.length > 3 && <span className="muted small">+{hitLabels.length - 3}</span>}
+            </div>
+          )}
         </div>
         <IconButton size="sm" icon={<LuPlus size={15} />} title="Add to board" className="lib-add" onClick={(e) => { e.stopPropagation(); onAdd(); }} />
       </div>
@@ -545,7 +564,7 @@ function LibraryRow({ item, expanded, onToggle, onAdd, onDragStart }) {
             <div key={k} className="lib-kv"><span>{k}</span><span className="mono">{v.length > 70 ? `${v.slice(0, 70)}…` : v}</span></div>
           ))}
           <div className="lib-detail-foot">
-            <span className="muted">Used {item.count}× · <span className="mono">{item.source}</span></span>
+            <span className="muted">Used {item.count}× · <span className="mono">{item.source}</span>{(item.labels || []).length > 0 && <> · labels {item.labels.slice(0, 6).join(', ')}{item.labels.length > 6 ? '…' : ''}</>}</span>
             <button type="button" className="btn sm" onClick={onAdd}><LuPlus size={13} /> Add to board</button>
           </div>
         </div>
@@ -554,10 +573,25 @@ function LibraryRow({ item, expanded, onToggle, onAdd, onDragStart }) {
   );
 }
 
-function Palette({ catalog, onAdd, onReload, reloading, onCollapse, explorer }) {
-  const [tab, setTab] = useState(explorer ? 'files' : 'blocks');
+function Palette({ catalog, onAdd, onReload, reloading, onCollapse }) {
+  const [tab, setTab] = useState('blocks'); // starters are shown first
+  const [sq, setSq] = useState('');
   const [kind, setKind] = useState('workflow');
   const [q, setQ] = useState('');
+  // a search result asked for a block: show the library filtered to it
+  useEffect(() => {
+    const take = () => {
+      const w = window.__pendingLibrary;
+      if (!w) return;
+      window.__pendingLibrary = null;
+      setTab('library');
+      setKind(w.kind);
+      setQ(w.query);
+    };
+    take();
+    window.addEventListener('nevis-library', take);
+    return () => window.removeEventListener('nevis-library', take);
+  }, []);
   const [f1, setF1] = useState('');
   const [f2, setF2] = useState('');
   const [group, setGroup] = useState('file');
@@ -587,7 +621,7 @@ function Palette({ catalog, onAdd, onReload, reloading, onCollapse, explorer }) 
       if (f1 && (kind === 'workflow' ? x.def.flow : x.def.host) !== f1) return false;
       if (f2 && ![x.def.method_ident, x.def.method_auth, x.def.method].map(String).includes(f2)) return false;
       if (!needle) return true;
-      return x.name.toLowerCase().includes(needle) || x.source.toLowerCase().includes(needle) || JSON.stringify(x.def).toLowerCase().includes(needle);
+      return x.name.toLowerCase().includes(needle) || x.source.toLowerCase().includes(needle) || (x.labels || []).some((l) => l.toLowerCase().includes(needle)) || JSON.stringify(x.def).toLowerCase().includes(needle);
     });
   }, [list, q, f1, f2, kind]);
 
@@ -614,6 +648,7 @@ function Palette({ catalog, onAdd, onReload, reloading, onCollapse, explorer }) 
     const id = `${x.source}::${x.name}::${i}`;
     return (
       <LibraryRow
+        query={q}
         key={id}
         item={x}
         expanded={expandedRow === id}
@@ -637,45 +672,52 @@ function Palette({ catalog, onAdd, onReload, reloading, onCollapse, explorer }) 
           block={false}
           value={tab}
           onChange={setTab}
-          options={
-            explorer
-              ? [
-                  { value: 'files', label: 'Files' },
-                  { value: 'library', label: 'Library' },
-                  { value: 'blocks', label: 'Starters' },
-                ]
-              : [
-                  { value: 'library', label: 'Library', icon: <LuLibrary size={14} /> },
-                  { value: 'blocks', label: 'Starters', icon: <LuBlocks size={14} /> },
-                ]
-          }
+          options={[
+            { value: 'blocks', label: 'Starters', icon: <LuBlocks size={14} /> },
+            { value: 'library', label: 'Library', icon: <LuLibrary size={14} /> },
+          ]}
         />
         <span className="spacer" />
-        {tab !== 'files' && <IconButton size="sm" icon={<LuRefreshCw size={14} className={reloading ? 'spin' : ''} />} title="Re-read the repo (config files and pytest code)" onClick={onReload} disabled={reloading} />}
-        <IconButton size="sm" icon={<LuPanelLeftClose size={15} />} title="Hide library" onClick={onCollapse} />
+        {tab === 'library' && <IconButton size="sm" icon={<LuRefreshCw size={14} className={reloading ? 'spin' : ''} />} title="Re-read the repo (config files and pytest code)" onClick={onReload} disabled={reloading} />}
+        <IconButton size="sm" icon={<LuPanelLeftClose size={15} />} title="Hide blocks" onClick={onCollapse} />
       </div>
 
-      {tab === 'files' && explorer ? (
-        <FileTree {...explorer} />
-      ) : tab === 'blocks' ? (
+      {tab === 'blocks' ? (
         <div className="panel-scroll">
-          <div className="list-hint">Start from scratch. Each block is minimal; anything you leave unset falls back to <span className="mono">config/defaults</span>.</div>
-          {TEMPLATES.map((t) => (
-            <div
-              key={t.id}
-              className={`starter kind-${t.kind}`}
-              draggable
-              onDragStart={(e) => e.dataTransfer.setData('application/x-bld', JSON.stringify({ kind: t.kind, def: t.def, origin: null }))}
-              onClick={() => onAdd({ kind: t.kind, def: t.def, origin: null })}
-            >
-              <span className="starter-icon"><KindIcon kind={t.kind} size={16} /></span>
-              <div className="starter-text">
-                <div className="starter-title">{t.title}</div>
-                <div className="starter-sub">{t.hint}</div>
-              </div>
-              <LuPlus size={15} className="muted" />
+          <div className="lib-controls">
+            <div className="search-box">
+              <LuSearch size={14} className="search-box-icon" />
+              <input autoFocus placeholder="Search starters (register, login, token…)" value={sq} onChange={(e) => setSq(e.target.value)} spellCheck={false} />
+              {sq && <IconButton size="xs" icon={<LuX size={13} />} title="Clear search" onClick={() => setSq('')} />}
             </div>
-          ))}
+          </div>
+          {['Workflows', 'Endpoints'].map((g) => {
+            const list = TEMPLATES.filter((t) => t.group === g && (!sq.trim() || `${t.title} ${t.hint} ${t.def.name} ${t.def.flow || ''} ${t.def.endpoint || ''}`.toLowerCase().includes(sq.trim().toLowerCase())));
+            return list.length ? (
+            <div key={g} className="starter-group">
+              <div className="starter-group-title">{g} <em>{list.length}</em></div>
+              {list.map((t) => (
+                <div
+                  key={t.id}
+                  className={`starter kind-${t.kind}`}
+                  draggable
+                  onDragStart={(e) => e.dataTransfer.setData('application/x-bld', JSON.stringify({ kind: t.kind, def: t.def, origin: null }))}
+                  onClick={() => onAdd({ kind: t.kind, def: t.def, origin: null })}
+                >
+                  <span className="starter-icon"><KindIcon kind={t.kind} size={16} /></span>
+                  <div className="starter-text">
+                    <div className="starter-title">{t.title}</div>
+                    <div className="starter-sub">{t.hint}</div>
+                  </div>
+                  <LuPlus size={15} className="muted starter-plus" />
+                </div>
+              ))}
+            </div>
+            ) : null;
+          })}
+          {sq.trim() && !TEMPLATES.some((t) => `${t.title} ${t.hint} ${t.def.name}`.toLowerCase().includes(sq.trim().toLowerCase())) && (
+            <div className="list-hint">No starter matches. <button type="button" className="link-btn" onClick={() => { window.__pendingLibrary = { kind: 'workflow', query: sq.trim() }; window.dispatchEvent(new Event('nevis-library')); setSq(''); }}>Search the library for “{sq.trim()}”</button></div>
+          )}
         </div>
       ) : (
         <>
@@ -691,7 +733,7 @@ function Palette({ catalog, onAdd, onReload, reloading, onCollapse, explorer }) 
             />
             <div className="search-box">
               <LuSearch size={14} className="search-box-icon" />
-              <input placeholder="Search name, file or property" value={q} onChange={(e) => setQ(e.target.value)} spellCheck={false} />
+              <input placeholder="Search name, label, file or property" value={q} onChange={(e) => setQ(e.target.value)} spellCheck={false} />
               {q && <IconButton size="xs" icon={<LuX size={13} />} title="Clear search" onClick={() => setQ('')} />}
             </div>
             <div className="lib-filters">
@@ -976,16 +1018,17 @@ function ConfirmModal({ title, children, confirm, danger, onConfirm, onClose }) 
 
 function TestModal({ scenario, namespaces, defaultNamespace, busy, error, onRun, onClose }) {
   const [ns, setNs] = useState(defaultNamespace);
+  const [podKeys, setPodKeys] = useState(new Set());
   return (
     <Modal
       title="Test scenario"
       icon={<LuPlay size={15} />}
       onClose={onClose}
-      width={520}
+      width={560}
       footer={
         <>
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
-          <button type="button" className="btn primary" disabled={busy || !ns} onClick={() => onRun(ns)}>
+          <button type="button" className="btn primary" disabled={busy || !ns} onClick={() => onRun(ns, podsFromKeys(podKeys))}>
             {busy ? <LuLoader size={14} className="spin" /> : <LuPlay size={14} />}
             {busy ? 'Starting…' : 'Run test'}
           </button>
@@ -1004,6 +1047,7 @@ function TestModal({ scenario, namespaces, defaultNamespace, busy, error, onRun,
         <Field label="Run against namespace" hint="Only namespaces defined in the repo's config are listed.">
           <Select value={ns} onChange={setNs} options={namespaces} placeholder="Select namespace" searchable={namespaces.length > 6} />
         </Field>
+        <PodPicker testNamespace={ns} value={podKeys} onChange={setPodKeys} />
         <div className="notice warn">
           <LuCircleAlert size={15} />
           <div>
@@ -1013,6 +1057,28 @@ function TestModal({ scenario, namespaces, defaultNamespace, busy, error, onRun,
         {error && <div className="notice danger"><LuCircleAlert size={15} /><div>{error}</div></div>}
       </div>
     </Modal>
+  );
+}
+
+// pytest output plus any pod logs tailed for the run, switchable like in Run tests.
+function DockLogs({ sources }) {
+  const names = Object.keys(sources);
+  const [tab, setTab] = useState('pytest');
+  const current = tab === 'all' || names.includes(tab) ? tab : 'pytest';
+  const all = useMemo(() => names.flatMap((n) => sources[n]).sort((a, b) => a.ts - b.ts).map((e) => ({ ...e, line: `[${e.source}] ${e.line}` })), [sources]); // eslint-disable-line react-hooks/exhaustive-deps
+  const short = (n) => n.replace(/^pod:[^/]*\//, '');
+  return (
+    <div className="dock-logs">
+      {names.length > 1 && (
+        <div className="subtabs">
+          <button className={current === 'all' ? 'subtab active' : 'subtab'} onClick={() => setTab('all')}>all <em>{all.length}</em></button>
+          {names.map((n) => (
+            <button key={n} className={current === n ? 'subtab active' : 'subtab'} onClick={() => setTab(n)} title={n}>{n === 'pytest' ? 'pytest' : short(n)} <em>{sources[n].length}</em></button>
+          ))}
+        </div>
+      )}
+      {current === 'all' ? <LogPanel title="all" entries={all} /> : <LogPanel key={current} title={current} entries={sources[current] || []} />}
+    </div>
   );
 }
 
@@ -1038,7 +1104,7 @@ function TestRunPanel({ onPopout, run, flow, sources, tab, setTab, traces, trace
             onChange={setTab}
             options={[
               { value: 'flow', label: 'Scenario flow' },
-              { value: 'logs', label: 'pytest logs' },
+              { value: 'logs', label: Object.keys(sources).length > 1 ? 'Logs' : 'pytest logs', count: Object.keys(sources).length > 1 ? Object.keys(sources).length : undefined },
               { value: 'traces', label: 'Traces', count: traces.traces.length || undefined },
             ]}
           />
@@ -1061,13 +1127,21 @@ function TestRunPanel({ onPopout, run, flow, sources, tab, setTab, traces, trace
           ) : tab === 'traces' ? (
             <TracesPanel runTraces={traces} focus={traceFocus} />
           ) : (
-            <LogPanel title="pytest" entries={sources.pytest || []} />
+            <DockLogs sources={sources} />
           )}
         </div>
       )}
     </div>
   );
 }
+
+// what a scenario still needs before it can be written to a file
+const missingDetails = (s) => {
+  const out = [];
+  if (!s.name.trim()) out.push('name');
+  if ((s.origIndex === undefined || s.origIndex === null) && !s.namespaces.length) out.push('namespaces');
+  return out;
+};
 
 const toScenarioPayload = (s) => {
   const sq = computeSequence(s);
@@ -1114,6 +1188,24 @@ export default function CreateTestView({ active, mode = 'create' }) {
   const [scenarios, setScenarios] = useState([newScenario(1)]);
   const [file, setFile] = useState(null); // explore mode: { relPath, snapshot, unresolved }
   const [treeFiles, setTreeFiles] = useState([]);
+  const [treeDirs, setTreeDirs] = useState([]);
+  const [treeUnscanned, setTreeUnscanned] = useState([]);
+  const [deleteAsk, setDeleteAsk] = useState(null); // { path, kind }
+  const [filesOpen, setFilesOpen] = useLocalState('bld.filesOpen', true);
+  const [filesW, setFilesW, resetFilesW] = usePanelSize('bld.files', 270, 200, () => Math.min(520, window.innerWidth * 0.35));
+  // Unsaved edits per file (relPath -> { scenarios, activeIdx }): kept when another file is opened and across page reloads.
+  const drafts = useRef(null);
+  if (drafts.current === null) {
+    drafts.current = new Map();
+    try {
+      for (const [k, v] of Object.entries(JSON.parse(localStorage.getItem('nevis.explorer.drafts') || '{}'))) drafts.current.set(k, v);
+    } catch (_) { /* no stored drafts */ }
+  }
+  const [draftPaths, setDraftPaths] = useState(() => new Set(drafts.current.keys()));
+  const syncDrafts = () => {
+    setDraftPaths((prev) => (prev.size === drafts.current.size && [...drafts.current.keys()].every((k) => prev.has(k)) ? prev : new Set(drafts.current.keys())));
+    try { localStorage.setItem('nevis.explorer.drafts', JSON.stringify(Object.fromEntries(drafts.current))); } catch (_) { /* storage full or blocked */ }
+  };
   const [treeQ, setTreeQ] = useState('');
   const [treeLoading, setTreeLoading] = useState(false);
   const [dirtyMap, setDirtyMap] = useState(new Map());
@@ -1131,6 +1223,12 @@ export default function CreateTestView({ active, mode = 'create' }) {
   const [testBusy, setTestBusy] = useState(false);
   const [testError, setTestError] = useState('');
   const [testRun, setTestRun] = useState(null);
+  const [testRunOf, setTestRunOf] = useState(null); // tab id of the scenario that started the run
+  const testRunning = !!testRun && ['starting', 'running'].includes(testRun.status);
+  // Editor tabs (like VS Code): the scenarios opened so far, across files. Each keeps its own draft; one test runs at a time.
+  const [tabs, setTabs] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('nevis.explorer.tabs') || '[]'); } catch (_) { return []; }
+  });
   const [testFlow, setTestFlow] = useState([]);
   const [testSources, setTestSources] = useState({});
   const [testOpen, setTestOpen] = useState(false);
@@ -1153,15 +1251,18 @@ export default function CreateTestView({ active, mode = 'create' }) {
   const [dockCollapsed, setDockCollapsed] = useState(false);
   const [dockMax, setDockMax] = useState(false);
   const [lastTestNs, setLastTestNs] = useLocalState('bld.testNs', '');
-  const [paletteOpen, setPaletteOpen] = useLocalState('bld.paletteOpen', true);
-  const [inspectorOpen, setInspectorOpen] = useLocalState('bld.inspectorOpen', true);
-  const [paletteW, setPaletteW, resetPaletteW] = usePanelSize('bld.palette', 320, 240, () => Math.min(560, window.innerWidth * 0.4));
-  const [inspectorW, setInspectorW, resetInspectorW] = usePanelSize('bld.inspector', 340, 260, () => Math.min(600, window.innerWidth * 0.4));
-  const [dockH, setDockH, resetDockH] = usePanelSize('bld.dock', 320, 140, () => Math.max(160, window.innerHeight - 260));
-  // selecting a block always brings its properties into view, even if the panel was collapsed
+  const [picker, setPicker] = useState(null); // the add-block menu: { anchor: 'pill' } | { x, y, at } where it was opened on the canvas
+  const colRef = useRef(null);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [detailsPrompt, setDetailsPrompt] = useState(false); // opened because saving needs details: show what is missing
+  const [detailsHint, setDetailsHint] = useState(false); // short-lived pointer at the Details button after a file opens
   useEffect(() => {
-    if (selectedId) setInspectorOpen(true);
-  }, [selectedId, setInspectorOpen]);
+    if (!detailsOpen) return undefined;
+    const k = (e) => e.key === 'Escape' && (setDetailsOpen(false), setDetailsPrompt(false));
+    window.addEventListener('keydown', k);
+    return () => window.removeEventListener('keydown', k);
+  }, [detailsOpen]);
+  const [dockH, setDockH, resetDockH] = usePanelSize('bld.dock', 320, 140, () => Math.max(160, window.innerHeight - 260));
   const canvasRef = useRef(null);
   const wsRef = useRef(null);
   const [scrollRef, viewport] = useElementSize();
@@ -1192,6 +1293,8 @@ export default function CreateTestView({ active, mode = 'create' }) {
     try {
       const [t, g] = await Promise.all([api.explorer.tree(), api.git.status().catch(() => null)]);
       setTreeFiles(t.files);
+      setTreeDirs(t.dirs || []);
+      setTreeUnscanned(t.unscanned || []);
       setDirtyMap(new Map((g?.files || []).map((f) => [f.path, f.status])));
     } catch (e) {
       toast(e.message, 'error');
@@ -1218,14 +1321,19 @@ export default function CreateTestView({ active, mode = 'create' }) {
   };
 
   const openFile = useCallback(
-    async (relPath, pick) => {
+    async (relPath, pick, { fresh = false } = {}) => {
       try {
         const parsed = await api.explorer.file(relPath);
         const built = buildFromFile(parsed, viewport.w);
-        setScenarios(built.length ? built : [newScenario(1)]);
-        setActiveIdx(pick !== undefined && pick !== null ? Math.max(0, built.findIndex((b) => b.origIndex === pick)) : 0);
+        const base = built.length ? built : [newScenario(1)]; // an empty file starts with one blank scenario
+        if (fresh) drafts.current.delete(relPath);
+        const draft = drafts.current.get(relPath);
+        const start = draft ? draft.scenarios : base;
+        setScenarios(start);
+        const at = pick !== undefined && pick !== null ? start.findIndex((b) => b.origIndex === pick) : -1;
+        setActiveIdx(at >= 0 ? at : draft ? Math.min(draft.activeIdx || 0, start.length - 1) : 0);
         setSelectedId(null);
-        setFile({ relPath: parsed.relPath, snapshot: sig(built), unresolved: parsed.unresolved });
+        setFile({ relPath: parsed.relPath, snapshot: sig(base), unresolved: parsed.unresolved });
       } catch (e) {
         toast(e.message, 'error');
       }
@@ -1235,9 +1343,159 @@ export default function CreateTestView({ active, mode = 'create' }) {
   );
 
   const dirty = explore && !!file && sig(scenarios) !== file.snapshot;
-  const requestOpen = (relPath, pick) => {
-    if (dirty) setConfirmOpen({ relPath, pick });
-    else openFile(relPath, pick);
+  const activeScenario = scenarios[activeIdx];
+  const tabId = (relPath, key) => `${relPath}#${key ?? 'new'}`;
+  const activeTabId = explore && file && activeScenario ? tabId(file.relPath, activeScenario.origIndex) : null;
+  useEffect(() => {
+    if (!activeTabId) return;
+    const label = (activeScenario.name || '').trim() || `Scenario ${activeIdx + 1}`;
+    setTabs((t) => {
+      const at = t.findIndex((x) => x.id === activeTabId);
+      const entry = { id: activeTabId, relPath: file.relPath, key: activeScenario.origIndex ?? null, label };
+      if (at < 0) return [...t, entry];
+      return t[at].label === label && t[at].relPath === file.relPath ? t : t.map((x, i) => (i === at ? entry : x));
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTabId, activeScenario?.name]);
+  useEffect(() => {
+    try { localStorage.setItem('nevis.explorer.tabs', JSON.stringify(tabs)); localStorage.setItem('nevis.explorer.activeTab', activeTabId || ''); } catch (_) { /* storage blocked */ }
+  }, [tabs, activeTabId]);
+  // after a page reload, reopen the tab that was active
+  const restoredTabs = useRef(false);
+  useEffect(() => {
+    if (!explore || !active || restoredTabs.current || file) return;
+    restoredTabs.current = true;
+    let id = '';
+    try { id = localStorage.getItem('nevis.explorer.activeTab') || ''; } catch (_) { /* storage blocked */ }
+    const t = tabs.find((x) => x.id === id);
+    if (t) api.explorer.file(t.relPath).then(() => openFile(t.relPath, t.key === null ? undefined : t.key)).catch(() => setTabs((all) => all.filter((x) => x.relPath !== t.relPath)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [explore, active]);
+  const openTab = (t) => {
+    if (file && t.relPath === file.relPath) {
+      const at = scenarios.findIndex((x) => (x.origIndex ?? null) === t.key);
+      if (at >= 0) { setActiveIdx(at); setSelectedId(null); return; }
+    }
+    openFile(t.relPath, t.key === null ? undefined : t.key);
+  };
+  const closeTab = (id) => {
+    const at = tabs.findIndex((x) => x.id === id);
+    const rest = tabs.filter((x) => x.id !== id);
+    setTabs(rest);
+    if (id !== activeTabId) return;
+    const next = rest[at] || rest[at - 1];
+    if (next) openTab(next);
+    else { setFile(null); setScenarios([newScenario(1)]); setActiveIdx(0); setSelectedId(null); }
+  };
+  const retarget = (from, to) => setTabs((t) => t.flatMap((x) => (x.relPath !== from ? [x] : to ? [{ ...x, relPath: to, id: tabId(to, x.key) }] : [])));
+  // The open file's unsaved edits are mirrored into the draft store, so opening another file loses nothing.
+  useEffect(() => {
+    if (!explore || !file) return;
+    if (dirty) drafts.current.set(file.relPath, { scenarios, activeIdx });
+    else drafts.current.delete(file.relPath);
+    syncDrafts();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [explore, file, dirty, scenarios, activeIdx]);
+
+  const requestOpen = (relPath, pick) => openFile(relPath, pick);
+  // a pointer at the Details button for a few seconds after a file opens (when it has something to fill in, or the first couple of times)
+  useEffect(() => {
+    if (!explore || !file) return undefined;
+    let seenTimes = 0;
+    try { seenTimes = Number(localStorage.getItem('nevis.hint.details') || 0); } catch (_) { /* storage blocked */ }
+    const incomplete = scenarios.some((x) => missingDetails(x).length);
+    if (!incomplete && seenTimes >= 2) return undefined;
+    try { localStorage.setItem('nevis.hint.details', String(seenTimes + 1)); } catch (_) { /* storage blocked */ }
+    setDetailsHint(true);
+    const t = setTimeout(() => setDetailsHint(false), 5200);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [explore, file?.relPath]);
+  // global search results: open a file / scenario, filter the tree by a label, or search the block library
+  useEffect(() => {
+    if (!explore) return undefined;
+    const onNav = (e) => {
+      const n = e.detail || {};
+      if (n.section !== 'explorer') return;
+      if (n.file) { setFilesOpen(true); openFile(n.file, n.scenario); }
+      if (n.treeQuery !== undefined) { setFilesOpen(true); setTreeQ(n.treeQuery); }
+      if (n.library) {
+        setPicker({});
+        window.__pendingLibrary = n.library;
+        setTimeout(() => window.dispatchEvent(new Event('nevis-library')), 60);
+      }
+    };
+    window.addEventListener('nevis-nav', onNav);
+    return () => window.removeEventListener('nevis-nav', onNav);
+  }, [explore, openFile, setFilesOpen]);
+  const rekeyDraft = (from, to) => {
+    const d = drafts.current.get(from);
+    if (d) { drafts.current.delete(from); drafts.current.set(to, d); }
+    syncDrafts();
+  };
+  const fail = (e) => toast(e.message, 'error');
+  const createFile = async (dir, name) => {
+    try {
+      const r = await api.explorer.create(dir, name);
+      await loadTree();
+      toast(`Created ${r.relPath}. Name the scenario and add blocks, then save.`);
+      openFile(r.relPath);
+      setDetailsOpen(true);
+    } catch (e) { fail(e); }
+  };
+  const createFolder = async (parent, name) => {
+    try {
+      const r = await api.explorer.folder(parent, name);
+      await loadTree();
+      toast(r.scanned ? `Created ${r.path}` : `Created ${r.path}. pytest only runs files in its own folders (features, tickets, ...): move files there to run them.`);
+    } catch (e) { fail(e); }
+  };
+  const moveFile = async (from, toDir) => {
+    try {
+      const r = await api.explorer.move(from, toDir);
+      if (r.moved) {
+        rekeyDraft(from, r.relPath);
+        retarget(from, r.relPath);
+        toast(`Moved to ${r.relPath}`);
+        await loadTree();
+        if (file?.relPath === from) openFile(r.relPath);
+      }
+    } catch (e) { fail(e); }
+  };
+  const renameFile = async (from, name) => {
+    try {
+      const r = await api.explorer.rename(from, name);
+      if (r.renamed) {
+        rekeyDraft(from, r.relPath);
+        retarget(from, r.relPath);
+        await loadTree();
+        if (file?.relPath === from) openFile(r.relPath);
+      }
+    } catch (e) { fail(e); }
+  };
+  const copyFile = async (from) => {
+    try {
+      const r = await api.explorer.copy(from);
+      await loadTree();
+      toast(`Copied to ${r.relPath}${r.newLabels ? ' (new uuid labels)' : ''}`);
+      openFile(r.relPath);
+    } catch (e) { fail(e); }
+  };
+  const deleteEntry = async ({ path, kind }) => {
+    try {
+      await api.explorer.remove(path, kind);
+      drafts.current.delete(path);
+      syncDrafts();
+      retarget(path, null);
+      if (file?.relPath === path) {
+        setFile(null);
+        setScenarios([newScenario(1)]);
+        setActiveIdx(0);
+        setSelectedId(null);
+      }
+      toast(`Deleted ${path}`);
+      loadTree();
+    } catch (e) { fail(e); }
   };
 
   useEffect(() => {
@@ -1268,16 +1526,17 @@ export default function CreateTestView({ active, mode = 'create' }) {
     };
   };
 
-  const startTest = async (namespace) => {
+  const startTest = async (namespace, pods = []) => {
     setTestBusy(true);
     setTestError('');
     try {
       let scenario = toScenarioPayload(scenarios[activeIdx]);
       // an existing scenario's uuid label must not be reused by the throw-away draft (it would run both)
       if (explore) scenario = { ...scenario, name: '', labels: scenario.labels.filter((l) => !/^[0-9a-f]{8}-[0-9a-f]{4}-/.test(l)) };
-      const { run } = await api.builder.test({ scenario, namespace });
+      const { run } = await api.builder.test({ scenario, namespace, pods });
       setLastTestNs(namespace);
       setTestRun({ id: run.id, status: run.status, exitCode: run.exitCode });
+      setTestRunOf(activeTabId);
       setTestFlow([]);
       setTestSources({});
       connectTestWs(run.id);
@@ -1321,18 +1580,74 @@ export default function CreateTestView({ active, mode = 'create' }) {
   };
 
   const addBlock = useCallback(
-    ({ kind, def, origin }, at) => {
+    ({ kind, def, origin }, at, { select = true } = {}) => {
       updateActive((s) => {
         const d = clone(def);
         d.name = uniqueName(d.name, s.nodes, d);
         const pos = at || nextSlot(s.nodes);
         const node = { id: uid(), kind, def: d, origin, x: snap(pos.x), y: snap(pos.y) };
-        setSelectedId(node.id);
+        if (select) setSelectedId(node.id);
         return { ...s, nodes: [...s.nodes, node] };
       });
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [updateActive, viewport.w]
+  );
+
+  // ---- add-block menu (canvas style): click the board or "+", pick a block, it joins the sequence
+  const tailId = () => {
+    const q = computeSequence(sc);
+    return q.problems.length === 0 && q.order.length ? q.order[q.order.length - 1] : null;
+  };
+  useEffect(() => {
+    if (selectedId) setPicker(null); // Properties takes the right side: the add menu has no use then
+  }, [selectedId]);
+  const openPicker = (p) => {
+    setSelectedId(null);
+    setDetailsOpen(false);
+    setPicker(p);
+  };
+  const pickBlock = ({ kind, def, origin }) => {
+    const at = picker && picker.at;
+    updateActive((s) => {
+      const d = clone(def);
+      d.name = uniqueName(d.name, s.nodes, d);
+      const q = computeSequence(s);
+      const tail = q.problems.length === 0 && q.order.length ? q.order[q.order.length - 1] : null;
+      const pos = at || nextSlot(s.nodes);
+      const node = { id: uid(), kind, def: d, origin, x: snap(pos.x), y: snap(pos.y) };
+      return { ...s, nodes: [...s.nodes, node], edges: tail ? [...s.edges, { from: tail, to: node.id }] : s.edges };
+    });
+    setPicker(null);
+  };
+  const renderDetails = () => (
+    <div className="scen-pop-body">
+      {detailsPrompt && (
+        <div className="notice info small">
+          <LuInfo size={14} />
+          <div>{missingDetails(sc).length ? <>To save, this scenario still needs {missingDetails(sc).map((m) => (m === 'name' ? 'a name' : 'at least one supported namespace')).join(' and ')}. Fill it in, then press <b>Save changes…</b> again.</> : 'All set. Press Save changes… to review and write the file.'}</div>
+        </div>
+      )}
+      <Field label="Scenario name" hint="Needed to save, not to test">
+        <input className={`input ${detailsPrompt && !sc.name.trim() ? 'invalid' : ''}`} autoFocus={!sc.name.trim()} value={sc.name} onChange={(e) => updateActive((x) => ({ ...x, name: e.target.value }))} placeholder="register-then-login" spellCheck={false} />
+      </Field>
+      <Field label="Description">
+        <input className="input" value={sc.description} onChange={(e) => updateActive((x) => ({ ...x, description: e.target.value }))} placeholder="What this scenario proves" />
+      </Field>
+      <Field label="Labels" hint="A uuid label is added automatically">
+        <input className="input" value={sc.labelsText} onChange={(e) => updateActive((x) => ({ ...x, labelsText: e.target.value }))} placeholder="SEK-200300 regression-test" spellCheck={false} />
+      </Field>
+      <Field label="Supported namespaces" hint="Needed to save, not to test">
+        <ChipsInput invalid={detailsPrompt && missingDetails(sc).includes('namespaces')} value={sc.namespaces} onChange={(v) => updateActive((x) => ({ ...x, namespaces: v }))} suggestions={schema.namespaces} placeholder="Add namespace…" />
+      </Field>
+      <Field label="Clear output folder" hint="clear_output: wipe output/ before this scenario runs. On leaves the key out (the suite clears by default); off writes clear_output: false.">
+        <Switch
+          checked={sc.clearOutput !== false}
+          onChange={(on) => updateActive((x) => ({ ...x, clearOutput: on ? (x.clearOutput === true ? true : null) : false }))}
+          label={sc.clearOutput === false ? 'Off: output/ is kept' : 'On: output/ is wiped first'}
+        />
+      </Field>
+    </div>
   );
 
   const autoArrange = () =>
@@ -1513,8 +1828,10 @@ export default function CreateTestView({ active, mode = 'create' }) {
   // big as the visible area, so it never scrolls until the flow itself outgrows it.
   const contentW = sc.nodes.reduce((m, n) => Math.max(m, n.x + NODE_W), 0) + CANVAS_PAD;
   const contentH = sc.nodes.reduce((m, n) => Math.max(m, n.y + NODE_H), 0) + CANVAS_PAD;
-  const canvasW = Math.max(viewport.w, sc.nodes.length ? contentW : 0);
-  const canvasH = Math.max(viewport.h, sc.nodes.length ? contentH : 0);
+  // The board pans with the wheel / trackpad, but only as far as keeps the blocks in view: at the far end of the scroll, the last
+  // block's edge is still 40% of the window in. (With no blocks there is nothing to pan to.)
+  const canvasW = viewport.w + (sc.nodes.length ? Math.max(140, contentW - viewport.w * 0.4) : 0);
+  const canvasH = viewport.h + (sc.nodes.length ? Math.max(140, contentH - viewport.h * 0.4) : 0);
 
   const testProblems = chainProblems(sc);
   const testNamespaces = schema.namespaces;
@@ -1522,7 +1839,65 @@ export default function CreateTestView({ active, mode = 'create' }) {
   const dockHeight = dockMax ? Math.max(160, window.innerHeight - 260) : dockH;
 
   return (
-    <div className="view col">
+    <div className={explore ? 'view' : 'view col'}>
+        {explore && (filesOpen ? (
+          <aside className="panel side" style={{ width: filesW }}>
+            <FileTree
+              files={treeFiles}
+              dirs={treeDirs}
+              unscanned={treeUnscanned}
+              query={treeQ}
+              onQuery={setTreeQ}
+              openPath={file?.relPath}
+              activeScenario={scenarios[activeIdx]?.origIndex}
+              dirty={dirtyMap}
+              drafts={draftPaths}
+              onOpen={requestOpen}
+              onRefresh={loadTree}
+              loading={treeLoading}
+              onCreateFile={createFile}
+              onCreateFolder={createFolder}
+              onMove={moveFile}
+              onCopy={copyFile}
+              onRename={renameFile}
+              onDelete={(path, kind) => setDeleteAsk({ path, kind })}
+              onCollapsePanel={() => setFilesOpen(false)}
+            />
+            <Sash edge="end" size={filesW} onSize={setFilesW} onReset={resetFilesW} />
+          </aside>
+        ) : (
+          <div className="rail left">
+            <IconButton size="md" icon={<LuPanelLeftOpen size={16} />} title="Show files" onClick={() => setFilesOpen(true)} />
+            <span className="rail-label">Files</span>
+          </div>
+        ))}
+
+      <div className="view col">
+      {explore && tabs.length > 0 && (
+        <div className="editor-tabs" role="tablist">
+          {tabs.map((t) => {
+            const on = t.id === activeTabId;
+            const isRunning = testRunning && testRunOf === t.id;
+            return (
+              <div
+                key={t.id}
+                role="tab"
+                aria-selected={on}
+                className={`editor-tab ${on ? 'active' : ''}`}
+                onClick={() => !on && openTab(t)}
+                onAuxClick={(e) => { if (e.button === 1) { e.preventDefault(); closeTab(t.id); } }}
+                title={`${t.relPath}${t.key === null ? '' : ` · scenario ${t.key + 1}`}`}
+              >
+                {isRunning ? <LuLoader size={13} className="spin" /> : <LuWorkflow size={13} className="muted" />}
+                <span className="editor-tab-name">{t.label}</span>
+                <span className="editor-tab-file">{t.relPath.split('/').pop().replace(/\.yaml$/, '')}</span>
+                {draftPaths.has(t.relPath) && <span className="dirty-dot" title="Unsaved changes are kept in the app" />}
+                <button type="button" className="editor-tab-x" aria-label="Close tab" title="Close" onClick={(e) => { e.stopPropagation(); closeTab(t.id); }}><LuX size={12} /></button>
+              </div>
+            );
+          })}
+        </div>
+      )}
       <div className="tabstrip">
         {explore && file && (
           <div className="file-crumb" title={file.relPath}>
@@ -1583,8 +1958,8 @@ export default function CreateTestView({ active, mode = 'create' }) {
         <button
           type="button"
           className="btn"
-          disabled={testProblems.length > 0 || (explore && !file) || !!yamlError}
-          title={yamlError || testProblems[0] || 'Run this flow through real pytest before saving'}
+          disabled={testProblems.length > 0 || (explore && !file) || !!yamlError || testRunning}
+          title={testRunning ? 'A test is running: only one scenario runs at a time. Wait for it or stop it in the run panel.' : yamlError || testProblems[0] || 'Run this flow through real pytest before saving'}
           onClick={() => { setTestError(''); setTestModal(true); }}
         >
           <LuPlay size={14} /> Test scenario
@@ -1600,6 +1975,15 @@ export default function CreateTestView({ active, mode = 'create' }) {
               disabled={!dirty || !!yamlError}
               title={yamlError || undefined}
               onClick={() => {
+                // details first: a scenario without a name (or a new one without a namespace) cannot be saved, so ask for them
+                const lacking = scenarios.findIndex((x) => missingDetails(x).length);
+                if (lacking >= 0) {
+                  setActiveIdx(lacking);
+                  setSelectedId(null);
+                  setDetailsPrompt(true);
+                  setDetailsOpen(true);
+                  return;
+                }
                 const pl = explorePayload();
                 if (pl.problems.length) toast(pl.problems[0], 'error');
                 else setSaveChangesOpen(pl);
@@ -1619,47 +2003,44 @@ export default function CreateTestView({ active, mode = 'create' }) {
         <div className="notice warn banner"><LuCircleAlert size={15} /><div>{file.unresolved.length} sequence entr{file.unresolved.length === 1 ? 'y is' : 'ies are'} not defined in this file ({file.unresolved.slice(0, 3).join('; ')}). Saving is blocked until they resolve.</div></div>
       )}
 
-      <Section title="Scenario details" flush storageKey="bld.sec.details" className="details-section" actions={
-        <span className="mini-select" title="clear_output: wipe the output/ folder before this scenario runs. Default leaves the key out (the suite then clears it).">
-          <span>Clear output</span>
-          <Select
-            size="sm"
-            value={typeof sc.clearOutput === 'boolean' ? String(sc.clearOutput) : 'unset'}
-            onChange={(v) => updateActive((s) => ({ ...s, clearOutput: v === 'unset' ? null : v === 'true' }))}
-            options={[{ value: 'unset', label: 'Default' }, { value: 'true', label: 'Yes' }, { value: 'false', label: 'No' }]}
-          />
-        </span>
-      } badge={sc.namespaces.length ? `${sc.namespaces.length} namespace${sc.namespaces.length === 1 ? '' : 's'}` : null}>
-        <div className="details-grid">
-          <Field label="Scenario name" hint="Needed to save, not to test">
-            <input className="input" value={sc.name} onChange={(e) => updateActive((s) => ({ ...s, name: e.target.value }))} placeholder="register-then-login" spellCheck={false} />
-          </Field>
-          <Field label="Description">
-            <input className="input" value={sc.description} onChange={(e) => updateActive((s) => ({ ...s, description: e.target.value }))} placeholder="What this scenario proves" />
-          </Field>
-          <Field label="Labels" hint="A uuid label is added automatically">
-            <input className="input" value={sc.labelsText} onChange={(e) => updateActive((s) => ({ ...s, labelsText: e.target.value }))} placeholder="SEK-200300 regression-test" spellCheck={false} />
-          </Field>
-          <Field label="Supported namespaces" hint="Needed to save, not to test">
-            <ChipsInput value={sc.namespaces} onChange={(v) => updateActive((s) => ({ ...s, namespaces: v }))} suggestions={schema.namespaces} placeholder="Add namespace…" />
-          </Field>
-        </div>
-      </Section>
 
       <div className="view-main">
-        {paletteOpen ? (
-          <aside className="panel side" style={{ width: paletteW }}>
-            <Palette catalog={catalog} onAdd={(b) => addBlock(b)} onReload={() => loadAll(false)} reloading={reloading} onCollapse={() => setPaletteOpen(false)} explorer={explore ? { files: treeFiles, query: treeQ, onQuery: setTreeQ, openPath: file?.relPath, activeScenario: scenarios[activeIdx]?.origIndex, dirty: dirtyMap, onOpen: requestOpen, onRefresh: loadTree, loading: treeLoading } : null} />
-            <Sash edge="end" size={paletteW} onSize={setPaletteW} onReset={resetPaletteW} />
-          </aside>
-        ) : (
-          <div className="rail left">
-            <IconButton size="md" icon={<LuPanelLeftOpen size={16} />} title="Show library" onClick={() => setPaletteOpen(true)} />
-            <span className="rail-label">Library</span>
-          </div>
-        )}
-
-        <div className="board-col">
+        <div className="board-col" ref={colRef}>
+          {view === 'board' && (!explore || file) && (
+            <div className="canvas-chips">
+              <button type="button" className={`canvas-chip scen ${detailsOpen ? 'open' : ''}`} onClick={() => { setDetailsOpen((o) => !o); setDetailsPrompt(false); setDetailsHint(false); setSelectedId(null); setPicker(null); }} title="Name, description, labels, namespaces and options of this scenario" aria-expanded={detailsOpen}>
+                <LuSlidersHorizontal size={14} />
+                <span className="canvas-chip-name">{sc.name.trim() || 'Unnamed scenario'}</span>
+                <span className="muted">{sc.namespaces.length ? `${sc.namespaces.length} ns` : 'no namespace'}</span>
+                {(!sc.name.trim() || !sc.namespaces.length) && <span className="need-dot" title="Needed to save" />}
+              </button>
+              <button type="button" className={`canvas-chip add ${picker ? 'open' : ''}`} onClick={() => (picker ? setPicker(null) : openPicker({}))} title="Add a workflow or an endpoint interaction">
+                <LuPlus size={14} /> Add block
+              </button>
+              {detailsHint && !detailsOpen && (
+                <div className="scen-hint" role="status" onClick={() => setDetailsHint(false)}>
+                  <b>Scenario details</b>
+                  <span>Name it, add labels and namespaces here.</span>
+                </div>
+              )}
+            </div>
+          )}
+          {view === 'board' && (selected || detailsOpen) && (
+            <div className="float-panel right">
+              <div className="panel-head slim">
+                <span className="panel-title">{selected ? 'Properties' : 'Scenario details'}</span>
+                <IconButton size="sm" icon={<LuX size={15} />} title="Close" onClick={() => { setSelectedId(null); setDetailsOpen(false); setDetailsPrompt(false); }} />
+              </div>
+              <div className="panel-scroll">
+                {selected ? <Inspector node={selected} schema={schema} onChange={setNode} onDelete={() => selected && deleteNode(selected.id)} /> : renderDetails()}
+              </div>
+            </div>
+          )}
+          {picker && view === 'board' && (
+            <div className="add-pop" role="dialog" aria-label="Add a block">
+              <Palette catalog={catalog} onAdd={pickBlock} onReload={() => loadAll(false)} reloading={reloading} onCollapse={() => setPicker(null)} />
+            </div>
+          )}
           {view === 'yaml' && <YamlEditor key={sc.id} scenario={sc} focusName={yamlFocus} onApply={applyYaml} onError={setYamlError} />}
           <div className="board-scroll" ref={scrollRef} hidden={view === 'yaml'}>
             <div
@@ -1668,7 +2049,14 @@ export default function CreateTestView({ active, mode = 'create' }) {
               style={{ width: canvasW, height: canvasH }}
               onDragOver={(e) => e.preventDefault()}
               onDrop={onDrop}
-              onPointerDown={(e) => e.target === canvasRef.current && setSelectedId(null)}
+              onClick={(e) => {
+                if (e.target !== canvasRef.current) return;
+                if (picker) { setPicker(null); return; }
+                if (selectedId || detailsOpen) { setSelectedId(null); setDetailsOpen(false); setDetailsPrompt(false); return; }
+                if (explore && !file) return;
+                const pt = canvasPoint(e.clientX, e.clientY);
+                openPicker({ at: { x: pt.x - NODE_W / 2, y: pt.y - NODE_H / 2 } });
+              }}
             >
               <svg width={canvasW} height={canvasH} className="board-svg">
                 <defs>
@@ -1730,14 +2118,42 @@ export default function CreateTestView({ active, mode = 'create' }) {
                 </div>
               ))}
 
+              {sc.nodes.length > 0 && tailId() && (() => {
+                const t = nodeById[tailId()];
+                return (
+                  <button
+                    type="button"
+                    className="board-add"
+                    style={{ left: t.x + NODE_W + 34, top: t.y + NODE_H / 2 - 16 }}
+                    title="Add the next step"
+                    aria-label="Add the next step"
+                    onClick={(e) => { e.stopPropagation(); if (picker) setPicker(null); else openPicker({ at: { x: t.x + NODE_W + 76, y: t.y } }); }}
+                  >
+                    <LuPlus size={16} />
+                  </button>
+                );
+              })()}
+
               {!sc.nodes.length && (
                 <div className="board-hint">
                   <LuBlocks size={26} />
                   <div className="board-hint-title">{explore && !file ? 'Open a test file' : 'Start building your flow'}</div>
                   {explore && !file ? (
-                    <div>Pick a file in the <b>Files</b> tab on the left.<br />Its scenarios open here as flows you can edit and test.</div>
+                    <div>Pick a file in <b>Files</b> on the left, or create one with its new file button.<br />Its scenarios open here as flows you can edit and test.</div>
                   ) : (
-                    <div>Drag a block from the library, or click <b>+</b> to add one.<br />Then drag from a block's right dot to the next block's left dot to connect them.</div>
+                    <>
+                      <div>Add the first step. Every block you add after it joins the sequence on its own.</div>
+                      <div className="board-hint-actions">
+                        <button type="button" className="btn primary" onClick={(e) => { e.stopPropagation(); openPicker({}); }}><LuPlus size={14} /> Add a block</button>
+                      </div>
+                      <div className="board-hint-quick">
+                        {TEMPLATES.filter((t) => ['register-user', 'login', 'register-device', 'endpoint'].includes(t.id)).map((t) => (
+                          <button key={t.id} type="button" className={`quick kind-${t.kind}`} onClick={(e) => { e.stopPropagation(); addBlock({ kind: t.kind, def: t.def, origin: null }, undefined, { select: false }); }}>
+                            <KindIcon kind={t.kind} size={13} /> {t.title}
+                          </button>
+                        ))}
+                      </div>
+                    </>
                   )}
                 </div>
               )}
@@ -1782,23 +2198,6 @@ export default function CreateTestView({ active, mode = 'create' }) {
           )}
         </div>
 
-        {inspectorOpen ? (
-          <aside className="panel side right" style={{ width: inspectorW }}>
-            <div className="panel-head slim">
-              <span className="panel-title">Properties</span>
-              <IconButton size="sm" icon={<LuPanelRightClose size={15} />} title="Hide properties" onClick={() => setInspectorOpen(false)} />
-            </div>
-            <div className="panel-scroll">
-              <Inspector node={selected} schema={schema} onChange={setNode} onDelete={() => selected && deleteNode(selected.id)} />
-            </div>
-            <Sash edge="start" size={inspectorW} onSize={setInspectorW} onReset={resetInspectorW} />
-          </aside>
-        ) : (
-          <div className="rail right">
-            <IconButton size="md" icon={<LuPanelRightOpen size={16} />} title="Show properties" onClick={() => setInspectorOpen(true)} />
-            <span className="rail-label">Properties</span>
-          </div>
-        )}
       </div>
 
       <div className="seqbar">
@@ -1835,27 +2234,39 @@ export default function CreateTestView({ active, mode = 'create' }) {
           onSaved={async (r) => {
             setSaveChangesOpen(false);
             toast(r.changed ? `Saved ${file.relPath.split('/').pop()} — review and commit it in the Git tab` : 'No changes to write');
-            await openFile(file.relPath, scenarios[activeIdx]?.origIndex);
+            await openFile(file.relPath, scenarios[activeIdx]?.origIndex, { fresh: true });
             loadTree();
           }}
         />
       )}
       {confirmOpen && (
         <ConfirmModal
-          title={confirmOpen.discard ? 'Discard unsaved changes?' : 'Leave with unsaved changes?'}
-          confirm={confirmOpen.discard ? 'Discard changes' : 'Discard and open'}
+          title="Discard unsaved changes?"
+          confirm="Discard changes"
           danger
           onClose={() => setConfirmOpen(null)}
           onConfirm={() => {
-            const c = confirmOpen;
             setConfirmOpen(null);
-            if (c.discard) openFile(file.relPath, scenarios[activeIdx]?.origIndex);
-            else openFile(c.relPath, c.pick);
+            openFile(file.relPath, scenarios[activeIdx]?.origIndex, { fresh: true });
           }}
         >
-          {confirmOpen.discard ? 'The file is reloaded from disk and your edits in this view are lost.' : `You have unsaved edits in ${file?.relPath.split('/').pop()}. Opening another file drops them.`}
+          The file is reloaded from disk and your edits in this view are lost.
         </ConfirmModal>
       )}
+      {deleteAsk && (
+        <ConfirmModal
+          title={deleteAsk.kind === 'folder' ? 'Delete folder?' : 'Delete file?'}
+          confirm="Delete"
+          danger
+          onClose={() => setDeleteAsk(null)}
+          onConfirm={() => { const d = deleteAsk; setDeleteAsk(null); deleteEntry(d); }}
+        >
+          <span className="mono">{deleteAsk.path}</span> is removed from disk
+          {deleteAsk.kind === 'folder' ? ' (only empty folders can be deleted).' : '. A file that git already tracks can be restored from the Git tab; a new, uncommitted one cannot.'}
+          {draftPaths.has(deleteAsk.path) && ' Its unsaved edits are dropped too.'}
+        </ConfirmModal>
+      )}
+      </div>
     </div>
   );
 }

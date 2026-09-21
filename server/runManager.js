@@ -12,10 +12,11 @@ const { REPO_ROOT, PYTEST_BIN } = require('./paths');
 
 // Trace ids as the components print them: `<timestamp> <32-hex trace> <16-hex span> ...` (also inside
 // printed traceparent headers). Level words mark lines worth a closer look on a failed flow.
-const LOG_TRACE_RE = /(?:^|[\s\[])([0-9a-f]{32})\s+[0-9a-f]{16}(?=\s)|traceparent\W{1,6}00-([0-9a-f]{32})-[0-9a-f]{16}/i;
+const LOG_TRACE_RE = /(?:^|[\s\[])([0-9a-f]{32})\s+([0-9a-f]{16})(?=\s)|traceparent\W{1,6}00-([0-9a-f]{32})-([0-9a-f]{16})/i;
 const ERROR_RE = /\b(ERROR|SEVERE|FATAL|Exception)\b/;
 const WARN_RE = /\bWARN(?:ING)?\b/;
 const MAX_LOG_TRACES = 6000;
+const MAX_RUNS = 30; // finished runs kept in memory (until the server restarts)
 const MAX_LOG_TRACES_PER_STEP = 8;
 
 class RunManager {
@@ -51,11 +52,12 @@ class RunManager {
     const fromLogs = run.flowTracker.traceRefsFromLogs(run.logTraces, known);
     const failedSteps = new Set();
     for (const test of run.flowTracker.snapshot()) for (const s of test.steps) if (s.status === 'failed') failedSteps.add(s.id);
-    const rank = (t) => (t.errors ? 0 : t.origin === 'logs' ? 2 : 1);
+    // suite traces first (reported ids, and log traces whose inbound request carried a traceparent), then anything else seen in the logs
+    const rank = (t) => (t.relation === 'other' ? 3 : t.errors ? 0 : t.origin === 'logs' ? 2 : 1);
     const groups = new Map();
     for (const t of [...reported, ...fromLogs]) {
       const g = groups.get(t.stepId) || groups.set(t.stepId, []).get(t.stepId);
-      g.push(t.origin === 'logs' ? { ...t, onFailedStep: failedSteps.has(t.stepId) } : t);
+      g.push(t.origin === 'logs' ? { ...t, onFailedStep: failedSteps.has(t.stepId), relation: t.inbound ? 'suite' : 'other' } : { ...t, relation: 'suite' });
     }
     const out = [];
     for (const g of groups.values()) {
@@ -64,6 +66,40 @@ class RunManager {
       for (const t of g) if (t.origin !== 'logs' || (fromLogsSeen += 1) <= MAX_LOG_TRACES_PER_STEP) out.push(t);
     }
     return out;
+  }
+
+  // Span ids seen next to trace ids in a run's component logs.
+  spanRefs(runId) {
+    const run = this.runs.get(runId);
+    if (!run) return [];
+    const out = [];
+    for (const t of run.logTraces.values()) for (const spanId of t.spans) out.push({ traceId: t.traceId, spanId, source: t.source });
+    return out;
+  }
+
+  // Removes a finished run. null = unknown id, false = still running.
+  remove(runId) {
+    const run = this.runs.get(runId);
+    if (!run) return null;
+    if (['starting', 'running'].includes(run.status)) return false;
+    this.runs.delete(runId);
+    return true;
+  }
+
+  clearFinished() {
+    let n = 0;
+    for (const [id, run] of this.runs) {
+      if (!['starting', 'running'].includes(run.status)) {
+        this.runs.delete(id);
+        n += 1;
+      }
+    }
+    return n;
+  }
+
+  _evictOld() {
+    const finished = [...this.runs.values()].filter((r) => !['starting', 'running'].includes(r.status)).sort((a, b) => a.createdAt - b.createdAt);
+    while (finished.length > MAX_RUNS) this.runs.delete(finished.shift().id);
   }
 
   get(runId) {
@@ -76,9 +112,16 @@ class RunManager {
     for (const [name, buf] of run.buffers.entries()) {
       sources[name] = withBacklog ? buf : { count: buf.length };
     }
+    const tests = run.flowTracker.snapshot();
+    const count = (o) => tests.filter((t) => t.outcome === o).length;
     return {
       id: run.id,
       createdAt: run.createdAt,
+      endedAt: run.endedAt || null,
+      kind: run.kind,
+      title: run.title || null,
+      counts: { total: tests.length, passed: count('passed'), failed: count('failed') + count('error'), running: tests.filter((t) => t.outcome === null).length },
+      scenarios: tests.map((t) => t.scenarioName || t.nodeId).slice(0, 8),
       status: run.status,
       exitCode: run.exitCode,
       config: run.publicConfig,
@@ -104,18 +147,21 @@ class RunManager {
 
   _noteLogTrace(run, source, entry) {
     const m = entry.line.match(LOG_TRACE_RE);
-    const id = m && (m[1] || m[2]);
+    const id = m && (m[1] || m[3]);
+    const spanId = m && (m[2] || m[4]);
     if (!id) return;
     const traceId = id.toLowerCase();
     if (/^0+$/.test(traceId)) return;
     let t = run.logTraces.get(traceId);
     if (!t) {
       if (run.logTraces.size >= MAX_LOG_TRACES) return;
-      t = { traceId, firstTs: entry.ts, lastTs: entry.ts, errors: 0, warns: 0, count: 0, source, sample: '' };
+      t = { traceId, firstTs: entry.ts, lastTs: entry.ts, errors: 0, warns: 0, count: 0, source, sample: '', spans: new Set() };
       run.logTraces.set(traceId, t);
     }
+    if (m[3]) t.inbound = true; // an inbound request carried a traceparent header: the caller (the suite) started this trace
     t.lastTs = entry.ts;
     t.count += 1;
+    if (spanId && t.spans.size < 60) t.spans.add(spanId.toLowerCase());
     const bad = ERROR_RE.test(entry.line);
     if (bad) t.errors += 1;
     else if (WARN_RE.test(entry.line)) t.warns += 1;
@@ -134,7 +180,7 @@ class RunManager {
 
   start(config) {
     const id = crypto.randomUUID();
-    const { env, namespace, labels, exclusionLabels, pods, ssh, onFinish } = config;
+    const { env, namespace, labels, exclusionLabels, pods, ssh, onFinish, kind, title } = config;
 
     const run = {
       id,
@@ -147,6 +193,8 @@ class RunManager {
       pytestProc: null,
       flowTracker: new ScenarioFlowTracker(),
       logTraces: new Map(),
+      kind: kind || 'tests',
+      title: title || null,
       publicConfig: {
         env,
         namespace,
@@ -156,6 +204,7 @@ class RunManager {
         ssh: ssh ? { host: ssh.host, user: ssh.user, keyPath: ssh.keyPath } : undefined, // never store/echo passphrase
       },
     };
+    this._evictOld();
     this.runs.set(id, run);
 
     // Kick off pod log tailers, one per selected pod in its own oc namespace/project.

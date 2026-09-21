@@ -42,6 +42,8 @@ NEVIS_TESTS_ROOT=/path/to/nevis-integration-tests ./start.sh
 ./stop.sh
 ```
 
+**Updating:** `git pull`, then run `./start.sh` again. It reinstalls dependencies and rebuilds the client only when they changed, and restarts a dashboard still running old code (`--rebuild` forces a full reinstall and rebuild).
+
 `--root` can be omitted when the dashboard sits inside the project folder (as `test-dashboard/`) or is started from inside it. If the project can't be found it exits with a message saying so.
 
 | Setting | Flag / env | Default |
@@ -78,28 +80,6 @@ npm install && npm start                    # port 4570 (needs a built client)
 cd client && npm install && npm run dev     # port 5173, proxies /api and /ws
 ```
 
-## Create test case tab
-
-Visual scenario builder. Drag building blocks (register user / login / register
-device / endpoint interaction) or any predefined workflow/endpoint from the repo
-onto the canvas, configure their properties in the right-hand panel, connect
-them with the ports (right dot -> next block's left dot), then **Save test
-case** and enter the ticket name.
-
-- Writes exactly one new file: `config/tickets/<ticket>_scenarios_config.yaml`.
-  pytest already globs `config/tickets/*.yaml`, so no code change is needed.
-- Never overwrites an existing file, and adds no comments to what it writes - just the config.
-- A uuid label is added to each scenario automatically, matching repo convention.
-- After saving, it runs `pytest --dry-run` (no requests) to prove the scenario is discovered.
-- **Test scenario** runs the draft through real pytest *before* anything is saved (real requests, like the
-  Tests tab). It uses a temporary `config/tickets/zz_dashboard_draft_*.yaml` that is deleted when the run ends.
-- **Add to existing file** appends the new scenario (plus any workflows/endpoints it needs) to a chosen
-  scenario file. Existing content is never rewritten; identical blocks already in that file are reused,
-  conflicting ones are rejected, and the result is re-parsed before anything is written.
-- Properties are discovered automatically: documented defaults, namespace defaults, and every
-  `self.config.get('key', default)` found by scanning `lib/**/*.py` (marked "auto"). The tab re-reads the
-  repo when opened/focused, or via the refresh button.
-
 ## UI notes
 
 - Left navigation (hamburger / `Ctrl/⌘ B` to collapse) replaces the top bar; every side panel, the scenario list
@@ -107,12 +87,15 @@ case** and enter the ticket name.
 - Controls (selects, date-time pickers, checkboxes, menus) are custom components, not browser defaults - see `client/src/ui.jsx`.
 - Log panels can be downloaded or opened directly in a locally installed IDE (VS Code, Cursor, IntelliJ, PyCharm, Sublime, Zed, ...
   or the system default editor). The server writes the (filtered) log to `.run/logs/` and launches the editor.
-- **Test scenario** in the builder only needs a valid chain of blocks; the namespace to run against is chosen in the dialog.
+- **Test scenario** in the Explorer only needs a valid chain of blocks; the namespace to run against is chosen in the dialog.
 
 ## Tracing
 
-The Tests tab (and the builder's test panel) has a **Traces** view: the request traces of a run, drawn as a
+The Tests tab (and the Explorer's test panel) has a **Traces** view: the request traces of a run, drawn as a
 service graph (test client → nevisproxy → auth → fido …) or a span timeline, with span details.
+The **Sequence** view lays the same hops out as a sequence diagram: components as lifelines, each request and its response in the order they
+happened, coloured green/amber/red by outcome with an error note on failures. On the graph, click a connection to list every call on it (method, route, status, duration, and the failing ones in red);
+expand a call for its details or jump to it in the timeline. **Calls on graph** lists the first calls right on the connections.
 
 - **How traces are linked:** the suite itself injects a W3C `traceparent` header (branch `SEK-200299-traceparent-headers`,
   `lib/tracing.py`): every workflow and endpoint interaction runs as one trace, and `conftest.py` logs its 32-hex `trace_id` per step
@@ -131,11 +114,52 @@ service graph (test client → nevisproxy → auth → fido …) or a span timel
 ## Explorer
 
 Browse every scenario file under `config/` like an IDE tree (search matches file names, scenario names, labels and
-workflow/endpoint names). Opening a file shows each of its scenarios as an editable flow, exactly like *Create new test*:
-edit properties, add blocks from the library, **Test scenario** (temporary draft, real requests, nothing written), then
-**Save changes…** shows the real YAML diff before writing. Saving patches only the definitions/scenarios you changed;
-the rest of the file (comments, spacing, quoting) stays byte-for-byte. A definition shared by several scenarios of the file is
-edited in all of them at once. Keys the editor does not model (e.g. `clear_output`) are never touched.
+workflow/endpoint names). Opening a file shows each of its scenarios as an editable flow: drag building blocks (register
+user / login / register device / endpoint interaction, or any workflow/endpoint already in the repo) onto the canvas,
+configure their properties in the right-hand panel, connect them with the ports (right dot → next block's left dot),
+**Test scenario** (temporary draft, real requests, nothing written), then **Save changes…** shows the real YAML diff
+before writing. Saving patches only the definitions/scenarios you changed; the rest of the file (comments, spacing,
+quoting) stays byte-for-byte. A definition shared by several scenarios of the file is edited in all of them at once.
+Keys the editor does not model are never touched.
+
+- **Layout:** *Files* is a panel of its own, full height like in VS Code. To build, click the board, **+ Add block**, or the dashed **+** after the last block: a menu with searchable **Starters** and the repo **Library** opens where you clicked, and the block joins the sequence after the last one. The scenario's name, labels, namespaces and options are behind the scenario chip on the board and open in the floating side panel (the same one that shows a block's properties).
+- **Files toolbar (VS Code style):** new file, new folder, refresh, collapse folders. New entries go into the selected folder
+  (`config/tickets` by default); a name box appears in the tree, Enter creates it. New files start empty and valid.
+- **Editor tabs:** every scenario you open gets a tab (with its own kept draft) that you can switch between, close (× or middle-click) and test on its own, one test at a time.
+- **Right-click** a file for Open, Duplicate (a `-copy` file with fresh uuid labels, so both do not run under one label),
+  Rename (also F2), Copy path and Delete (also the Delete key, with a confirmation); right-click a folder for New file / New
+  folder / Delete (empty folders only). Drag a file onto a folder to move it.
+- **Unsaved edits are kept per file:** open another file and come back, switch tabs, or reload the page, and your draft is
+  still there (a dot marks files with a draft). **Discard** or **Save** clears it.
+- **Folders:** the ones pytest reads (`config/features`, `config/tickets`, `config/endpoint`, `config/crossfunctional`,
+  `config/performance`, `config/BETesting_team`, `config`) run their files. Folders you create elsewhere under `config/` are
+  marked *not run*: pytest ignores them until the files are moved into one of the others. Moves, renames and deletes are refused
+  while a test run is active.
+- **Test scenario** uses a temporary `config/tickets/zz_dashboard_draft_*.yaml` that is deleted when the run ends.
+- Properties are discovered automatically: documented defaults, namespace defaults, and every
+  `self.config.get('key', default)` found by scanning `lib/**/*.py` (marked "auto").
+- A uuid label is added to each new scenario automatically, matching repo convention.
+
+## Search everything
+
+**Ctrl/⌘ K** (or the Search button in the sidebar) opens a global search over files, scenarios, labels, workflow/endpoint blocks,
+default configs, `.env` variable names (values are never searched or shown), History runs, traces, Git and, from what the
+Deployments tab last loaded, cluster resources. Results are grouped by kind with coloured tags; the chips narrow to one kind;
+Enter jumps straight there.
+
+## Notifications
+
+The sidebar shows a pulsing badge on **History** with the number of runs in progress and a badge on **Git** with the number of
+uncommitted changes (like VS Code). When a run starts or finishes while you are on another tab, a toast tells you; click it to open
+that execution in History. Only one test runs at a time.
+
+## History
+
+Every run started from the dashboard (Run tests, or Test scenario in the Explorer) is listed under **History** with its
+status, duration, namespace and passed/failed counts, grouped by day and filterable by result or text. Pick one to get back
+to its scenario flow, logs and traces, exactly as they were, or pop it out into its own window. Runs are kept in memory
+(the latest 30 finished ones) until the dashboard server restarts, so a page refresh loses nothing; remove single runs or all
+finished ones from the list. Run tests also reopens the run you were last looking at after a refresh.
 
 ## Git
 
@@ -189,7 +213,7 @@ Any view can be opened in its own browser window, for example to keep the logs o
 
 - Hover a sidebar item and click the pop-out icon, or press **Ctrl+Alt+O** (**⌘⌥O** on a Mac) for the current view.
 - In **Run tests**, **Pop out** opens the run's logs (one source or all), scenario flow, traces, or everything. The log toolbar
-  and the Explorer/Create test run panel have the same button. **Ctrl+Alt+L** (**⌘⌥L**) opens the latest run's output.
+  and the Explorer's run panel have the same button. **Ctrl+Alt+L** (**⌘⌥L**) opens the latest run's output.
 - Run windows are live views of the run. View windows are independent of the main window, so two windows can do different work.
 
 Allow pop-ups for the dashboard's address if the browser blocks the new window.
