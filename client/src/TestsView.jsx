@@ -3,6 +3,7 @@ import { api, wsUrl } from './api.js';
 import LogPanel from './LogPanel.jsx';
 import ScenarioFlow from './ScenarioFlow.jsx';
 import { LuCircleAlert, LuHistory, LuLoader, LuPanelLeftClose, LuPanelLeftOpen, LuPlay, LuRefreshCw, LuSearch, LuServer, LuSquare, LuSquareArrowOutUpRight, LuTags, LuTerminal, LuWorkflow } from 'react-icons/lu';
+import AusweisAppControl from './AusweisAppControl.jsx';
 import { TracesPanel, TraceSheet, TraceLinkContext, useRunTraces } from './tracing.jsx';
 import { LuWaypoints } from 'react-icons/lu';
 import { useOnOcLogin } from './OcSession.jsx';
@@ -66,7 +67,7 @@ export default function TestsView() {
   const [sources, setSources] = useState({}); // sourceName -> entries[]
   const [flow, setFlow] = useState([]);
   const [activeTab, setActiveTab] = useState('pytest');
-  const [mainView, setMainView] = useState('logs'); // 'logs' | 'flow'
+  const [mainView, setMainView] = useState('flow'); // 'flow' | 'logs' | 'traces'
   const [starting, setStarting] = useState(false);
   const [traceFocus, setTraceFocus] = useState(null);
   const [traceSheet, setTraceSheet] = useState(null); // trace peek that slides over the current view
@@ -263,7 +264,7 @@ export default function TestsView() {
       const { run } = await api.startRun(config);
       setCurrentRun({ id: run.id, status: run.status, exitCode: run.exitCode, config: run.config });
       setActiveTab('pytest');
-      setMainView('logs');
+      setMainView('flow');
       connectWs(run.id, run.sources, run.flow);
       refreshRuns();
     } catch (err) {
@@ -352,6 +353,7 @@ export default function TestsView() {
               <Field label="Exclusion labels">
                 <input className="input" value={exclusionText} onChange={(e) => setExclusionText(e.target.value)} placeholder="eid" spellCheck={false} />
               </Field>
+              <AusweisAppControl />
               <Field label="Test namespace">
                 <Select
                   value={namespace}
@@ -463,8 +465,8 @@ export default function TestsView() {
             value={mainView}
             onChange={setMainView}
             options={[
-              { value: 'logs', label: 'Logs', icon: <LuTerminal size={14} /> },
               { value: 'flow', label: 'Scenario flow', icon: <LuWorkflow size={14} />, count: flow.length || undefined },
+              { value: 'logs', label: 'Logs', icon: <LuTerminal size={14} /> },
               { value: 'traces', label: 'Traces', icon: <LuWaypoints size={14} />, count: runTraces.traces.length || undefined },
             ]}
           />

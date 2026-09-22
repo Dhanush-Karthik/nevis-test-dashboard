@@ -65,6 +65,11 @@ export const api = {
   defaults: () => fetch(`${BASE}/api/defaults`).then(j),
   projects: (cfg) => post('/api/oc/projects', cfg),
   pods: (cfg) => post('/api/oc/pods', cfg),
+  ausweisApp: {
+    status: () => fetch(`${BASE}/api/ausweisapp/status`).then(j),
+    start: () => post('/api/ausweisapp/start', {}),
+    stop: () => post('/api/ausweisapp/stop', {}),
+  },
   runs: () => fetch(`${BASE}/api/runs`).then(j),
   run: (id) => fetch(`${BASE}/api/runs/${id}`).then(j),
   startRun: (config) => post('/api/runs', config),

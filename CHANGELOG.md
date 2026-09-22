@@ -5,6 +5,28 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-22
+
+### Added
+- **eID simulator control.** Run tests, and the Explorer's **Test scenario** dialog, now have a **Start/Stop** control and status for
+  the AusweisApp2 podman container the suite uses for `eid`-labelled scenarios (the same container `lib/eid_helper.py` starts itself)
+  — no separate terminal needed. If podman itself isn't running (the usual "connection refused" on macOS/Windows), **Start** boots
+  the podman machine automatically first; nothing to run by hand.
+- **Formatted JSON in pytest logs.** A JSON body embedded in a line of the pytest run's own output (not pod logs) is now
+  pretty-printed in place, indented like the rest of the log — plain text, no extra box or button.
+- Scenario **Labels** are now added as chips, like **Supported namespaces**, instead of a raw space-separated text field —
+  suggestions come from labels already used elsewhere in the repo (excluding the auto-generated per-scenario uuid labels).
+- The Explorer's **Test scenario** dialog now has its own **Exclusion labels** field (defaults to `eid`, same as Run tests) —
+  previously fixed and not configurable there.
+
+### Changed
+- **Run tests** opens on **Scenario flow** by default (first tab, before Logs and Traces) instead of Logs.
+
+### Fixed
+- The sequence diagram's call detail panel can now be closed (✕) and expanded to a larger height, instead of being stuck open at
+  a fixed size until another call was selected.
+- When the trace list is hidden, its reopen button no longer overlaps the trace title.
+
 ## [1.2.1] - 2026-09-22
 
 ### Added

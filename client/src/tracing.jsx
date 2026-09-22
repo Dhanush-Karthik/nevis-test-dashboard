@@ -16,6 +16,7 @@ import {
   LuX,
   LuChartGantt,
   LuMaximize2,
+  LuMinimize2,
 } from 'react-icons/lu';
 import { api } from './api.js';
 import { describeCall, describeExternal, fmtBytes, httpFacts, statusTone, STATUS_TEXT } from './callDetails.js';
@@ -599,7 +600,7 @@ function buildSequence(spans, opts) {
 
 const attrLine = (v) => (typeof v === 'object' ? JSON.stringify(v) : String(v));
 
-function SeqDetail({ c, label, onShowSpan, traceId }) {
+function SeqDetail({ c, label, onShowSpan, traceId, expanded, onToggleExpand, onClose }) {
   const [allAttrs, setAllAttrs] = useState(false);
   useEffect(() => setAllAttrs(false), [c.n]);
   const { call, facts, span, parent } = c;
@@ -629,7 +630,7 @@ function SeqDetail({ c, label, onShowSpan, traceId }) {
   const attrs = [...Object.entries(span.attrs || {}).map(([k, v]) => [k, v, 'handler']), ...Object.entries((parent && parent.attrs) || {}).map(([k, v]) => [k, v, 'sender'])];
   const shownAttrs = allAttrs ? attrs : attrs.slice(0, 10);
   return (
-    <div className="seq-detail">
+    <div className={`seq-detail ${expanded ? 'expanded' : ''}`}>
       <div className="seq-detail-top">
         <span className={`seq-badge tone-${tone(call)}`}>{c.n}</span>
         <div className="seq-detail-title">
@@ -640,6 +641,8 @@ function SeqDetail({ c, label, onShowSpan, traceId }) {
         </div>
         <span className="spacer" />
         <button type="button" className="btn sm" onClick={() => onShowSpan(span.spanId)}><LuChartGantt size={13} /> Show in timeline</button>
+        <IconButton size="sm" icon={expanded ? <LuMinimize2 size={14} /> : <LuMaximize2 size={14} />} title={expanded ? 'Collapse' : 'Expand'} onClick={onToggleExpand} />
+        <IconButton size="sm" icon={<LuX size={15} />} title="Close" onClick={onClose} />
       </div>
       <div className="seq-detail-body">
         <section>
@@ -669,7 +672,9 @@ function SequenceDiagram({ trace, onShowSpan }) {
   const panRef = useDragScroll();
   const seq = useMemo(() => buildSequence(trace.spans, { internal: internalOn, external: externalOn }), [trace, internalOn, externalOn]);
   const [sel, setSel] = useState(null);
+  const [detailExpanded, setDetailExpanded] = useState(false);
   useEffect(() => setSel(null), [trace]);
+  useEffect(() => setDetailExpanded(false), [sel]);
   const t0 = trace.summary.startUs;
   const { parts, calls, steps, events, level, counts } = seq;
   const stats = useMemo(() => {
@@ -802,7 +807,17 @@ function SequenceDiagram({ trace, onShowSpan }) {
           </svg>
         </div>
       </div>
-      {selected && <SeqDetail c={selected} label={label} onShowSpan={onShowSpan} traceId={trace.traceId} />}
+      {selected && (
+        <SeqDetail
+          c={selected}
+          label={label}
+          onShowSpan={onShowSpan}
+          traceId={trace.traceId}
+          expanded={detailExpanded}
+          onToggleExpand={() => setDetailExpanded((x) => !x)}
+          onClose={() => setSel(null)}
+        />
+      )}
     </div>
   );
 }
@@ -1254,7 +1269,7 @@ export function TracesPanel({ runTraces, focus }) {
         </div>
       )}
 
-      <div className="trace-main">
+      <div className={`trace-main ${!listOpen ? 'list-collapsed' : ''}`}>
         {!listOpen && (
           <div className="trace-reopen">
             <IconButton size="sm" icon={<LuPanelLeftOpen size={15} />} title="Show trace list" onClick={() => setListOpen(true)} />
