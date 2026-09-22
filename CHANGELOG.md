@@ -5,6 +5,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-09-22
+
+### Added
+- **Search for pods to tail.** The "Pods to tail" list (Run tests, and the scenario test dock in the Explorer) now has its own filter
+  box, next to the existing namespace filter, so a pod can be found by typing instead of scrolling.
+
 ## [1.2.0] - 2026-09-21
 
 ### Added
