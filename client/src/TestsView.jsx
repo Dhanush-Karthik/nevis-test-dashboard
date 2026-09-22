@@ -50,6 +50,7 @@ export default function TestsView() {
   const [resolveError, setResolveError] = useState('');
 
   const [nsFilter, setNsFilter] = useState('');
+  const [podFilter, setPodFilter] = useState('');
   const [allNamespaces, setAllNamespaces] = useState([]);
   const [selectedNamespaces, setSelectedNamespaces] = useState(new Set());
   const [nsLoading, setNsLoading] = useState(false);
@@ -303,7 +304,8 @@ export default function TestsView() {
     .map((e) => ({ ...e, line: `[${e.source}] ${e.line}` }));
 
   const visibleNamespaces = allNamespaces.filter((n) => n.toLowerCase().includes(nsFilter.toLowerCase()));
-  const podsByNamespace = pods.reduce((acc, p) => {
+  const visiblePods = pods.filter((p) => p.name.toLowerCase().includes(podFilter.toLowerCase()));
+  const podsByNamespace = visiblePods.reduce((acc, p) => {
     (acc[p.namespace] = acc[p.namespace] || []).push(p);
     return acc;
   }, {});
@@ -403,6 +405,10 @@ export default function TestsView() {
 
               <Field label="Pods to tail" right={podsLoading && <LuLoader size={13} className="spin muted" />}>
                 {podsError && <div className="text-danger small">{podsError}</div>}
+                <div className="search-box">
+                  <LuSearch size={14} className="search-box-icon" />
+                  <input value={podFilter} onChange={(e) => setPodFilter(e.target.value)} placeholder="Filter pods" spellCheck={false} />
+                </div>
                 <div className="check-list">
                   {Object.entries(podsByNamespace).map(([ns, nsPods]) => (
                     <div key={ns} className="check-group">
@@ -424,6 +430,7 @@ export default function TestsView() {
                     </div>
                   ))}
                   {pods.length === 0 && !podsLoading && <div className="list-hint">Check a cluster namespace to auto-load its pods.</div>}
+                  {pods.length > 0 && visiblePods.length === 0 && <div className="list-hint">No match for “{podFilter}”.</div>}
                 </div>
               </Field>
             </Section>

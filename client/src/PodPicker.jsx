@@ -16,6 +16,7 @@ export default function PodPicker({ testNamespace, value, onChange }) {
   const [chosen, setChosen] = useState(new Set());
   const [pods, setPods] = useState([]);
   const [filter, setFilter] = useState('');
+  const [podFilter, setPodFilter] = useState('');
   const [loadingProjects, setLoadingProjects] = useState(false);
   const [loadingPods, setLoadingPods] = useState(false);
   const [error, setError] = useState('');
@@ -60,7 +61,8 @@ export default function PodPicker({ testNamespace, value, onChange }) {
   useOnOcLogin(() => { if (on) { loadProjects(); loadPods(); } });
 
   const shownProjects = useMemo(() => projects.filter((p) => p.toLowerCase().includes(filter.toLowerCase())), [projects, filter]);
-  const byNs = useMemo(() => pods.reduce((acc, p) => { (acc[p.namespace] = acc[p.namespace] || []).push(p); return acc; }, {}), [pods]);
+  const shownPods = useMemo(() => pods.filter((p) => p.name.toLowerCase().includes(podFilter.toLowerCase())), [pods, podFilter]);
+  const byNs = useMemo(() => shownPods.reduce((acc, p) => { (acc[p.namespace] = acc[p.namespace] || []).push(p); return acc; }, {}), [shownPods]);
   const toggle = (set, setter, key) => { const next = new Set(set); if (next.has(key)) next.delete(key); else next.add(key); setter(next); };
 
   return (
@@ -76,9 +78,16 @@ export default function PodPicker({ testNamespace, value, onChange }) {
             <div className="check-list short">
               {shownProjects.map((ns) => <Checkbox key={ns} className="check-row" checked={chosen.has(ns)} onChange={() => toggle(chosen, setChosen, ns)} label={ns} />)}
               {!projects.length && !loadingProjects && <div className="list-hint">No projects loaded.</div>}
+              {!!projects.length && !shownProjects.length && <div className="list-hint">No match for “{filter}”.</div>}
             </div>
           </Field>
           <Field label="Pods to tail" right={loadingPods && <LuLoader size={13} className="spin muted" />}>
+            {!!pods.length && (
+              <div className="search-box">
+                <LuSearch size={14} className="search-box-icon" />
+                <input value={podFilter} onChange={(e) => setPodFilter(e.target.value)} placeholder="Filter pods" spellCheck={false} />
+              </div>
+            )}
             <div className="check-list short">
               {Object.entries(byNs).map(([ns, list]) => (
                 <div key={ns} className="check-group">
@@ -95,6 +104,7 @@ export default function PodPicker({ testNamespace, value, onChange }) {
                 </div>
               ))}
               {!pods.length && !loadingPods && <div className="list-hint">Tick a namespace to list its pods.</div>}
+              {!!pods.length && !shownPods.length && <div className="list-hint">No match for “{podFilter}”.</div>}
             </div>
           </Field>
           {error && <div className="text-danger small">{error}</div>}
