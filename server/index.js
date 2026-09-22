@@ -15,6 +15,7 @@ const gitApi = require('./git');
 const ocLogin = require('./ocLogin');
 const defaultsConfig = require('./defaultsConfig');
 const envFile = require('./envFile');
+const ausweisApp = require('./ausweisApp');
 
 const PORT = process.env.DASHBOARD_PORT || 4570;
 
@@ -215,10 +216,11 @@ app.get('/api/builder/files', (req, res) => res.json({ files: testBuilder.listSc
 // Test-before-save: runs ONE draft scenario through real pytest (real requests, like
 // the Tests tab does) via a throw-away config file that is removed when the run ends.
 app.post('/api/builder/test', (req, res) => {
-  const { scenario, namespace, pods } = req.body || {};
+  const { scenario, namespace, pods, exclusionLabels } = req.body || {};
   if (!namespace) return res.status(400).json({ error: 'namespace is required' });
   const podList = Array.isArray(pods) ? pods : [];
   if (podList.some((p) => !p || !/^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/.test(p.name || '') || !/^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/.test(p.namespace || ''))) return res.status(400).json({ error: 'each pod needs a valid name and namespace' });
+  const exclusion = Array.isArray(exclusionLabels) ? exclusionLabels.map((l) => String(l).trim()).filter(Boolean) : ['eid'];
   // A test run only needs a flow + a target namespace: the scenario's own name and
   // supported namespaces are filled in for the throw-away draft when left blank.
   if (runActive()) return res.status(409).json({ error: 'A test is already running. Only one scenario runs at a time: wait for it to finish or stop it first.' });
@@ -226,7 +228,7 @@ app.post('/api/builder/test', (req, res) => {
   const draft = testBuilder.createDraft({ scenarios: [sc] });
   if (!draft.ok) return res.status(400).json({ error: draft.errors.join(' ') });
   try {
-    const run = runManager.start({ env: 'dev', namespace, labels: [draft.uuid], exclusionLabels: ['eid'], pods: podList, kind: 'scenario-test', title: sc.name, onFinish: draft.cleanup });
+    const run = runManager.start({ env: 'dev', namespace, labels: [draft.uuid], exclusionLabels: exclusion, pods: podList, kind: 'scenario-test', title: sc.name, onFinish: draft.cleanup });
     res.status(201).json({ run });
   } catch (err) {
     draft.cleanup();
@@ -252,6 +254,12 @@ app.post('/api/explorer/move', wrap((req) => { guardRun('moving files'); return 
 app.get('/api/explorer/file', wrap((req) => explorer.readFile(String(req.query.path || ''))));
 app.post('/api/explorer/preview', wrap((req) => explorer.preview(req.body || {})));
 app.post('/api/explorer/save', wrap((req) => explorer.save(req.body || {})));
+
+// ---- eID simulator (AusweisApp2, the same podman container lib/eid_helper.py starts for an
+// eid-labelled run) - so a dev doesn't need a separate terminal for it ----
+app.get('/api/ausweisapp/status', wrap(async () => ({ port: ausweisApp.PORT, ...(await ausweisApp.status()) })));
+app.post('/api/ausweisapp/start', wrap(async () => ({ port: ausweisApp.PORT, ...(await ausweisApp.start()) })));
+app.post('/api/ausweisapp/stop', wrap(async () => ({ port: ausweisApp.PORT, ...(await ausweisApp.stop()) })));
 
 // ---- git (the integration-tests repo) ----
 const runActive = () => runManager.list().some((r) => r.status === 'running' || r.status === 'starting');

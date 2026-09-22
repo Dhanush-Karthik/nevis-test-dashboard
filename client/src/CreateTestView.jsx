@@ -5,6 +5,7 @@ import LogPanel from './LogPanel.jsx';
 import { TracesPanel, TraceSheet, TraceLinkContext, useRunTraces } from './tracing.jsx';
 import FileTree from './FileTree.jsx';
 import PodPicker, { podsFromKeys } from './PodPicker.jsx';
+import AusweisAppControl from './AusweisAppControl.jsx';
 import { openPopout, setActiveRun, shortcutLabel } from './popout.js';
 import {
   LuChevronDown, LuChevronRight, LuCircleAlert, LuCog, LuLayoutGrid, LuLoader, LuMaximize2, LuMinimize2, LuPanelBottomClose, LuPanelLeftClose,
@@ -1019,6 +1020,7 @@ function ConfirmModal({ title, children, confirm, danger, onConfirm, onClose }) 
 function TestModal({ scenario, namespaces, defaultNamespace, busy, error, onRun, onClose }) {
   const [ns, setNs] = useState(defaultNamespace);
   const [podKeys, setPodKeys] = useState(new Set());
+  const [exclusion, setExclusion] = useState('eid');
   return (
     <Modal
       title="Test scenario"
@@ -1028,7 +1030,7 @@ function TestModal({ scenario, namespaces, defaultNamespace, busy, error, onRun,
       footer={
         <>
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
-          <button type="button" className="btn primary" disabled={busy || !ns} onClick={() => onRun(ns, podsFromKeys(podKeys))}>
+          <button type="button" className="btn primary" disabled={busy || !ns} onClick={() => onRun(ns, podsFromKeys(podKeys), parseList(exclusion))}>
             {busy ? <LuLoader size={14} className="spin" /> : <LuPlay size={14} />}
             {busy ? 'Starting…' : 'Run test'}
           </button>
@@ -1047,7 +1049,11 @@ function TestModal({ scenario, namespaces, defaultNamespace, busy, error, onRun,
         <Field label="Run against namespace" hint="Only namespaces defined in the repo's config are listed.">
           <Select value={ns} onChange={setNs} options={namespaces} placeholder="Select namespace" searchable={namespaces.length > 6} />
         </Field>
+        <Field label="Exclusion labels">
+          <input className="input" value={exclusion} onChange={(e) => setExclusion(e.target.value)} placeholder="eid" spellCheck={false} />
+        </Field>
         <PodPicker testNamespace={ns} value={podKeys} onChange={setPodKeys} />
+        <AusweisAppControl />
         <div className="notice warn">
           <LuCircleAlert size={15} />
           <div>
@@ -1184,6 +1190,7 @@ export default function CreateTestView({ active, mode = 'create' }) {
   const toast = useToast();
   const [schema, setSchema] = useState(null);
   const [catalog, setCatalog] = useState(null);
+  const [labelCatalog, setLabelCatalog] = useState([]);
   const [loadError, setLoadError] = useState('');
   const [scenarios, setScenarios] = useState([newScenario(1)]);
   const [file, setFile] = useState(null); // explore mode: { relPath, snapshot, unresolved }
@@ -1272,9 +1279,11 @@ export default function CreateTestView({ active, mode = 'create' }) {
   const loadAll = useCallback(async (initial) => {
     setReloading(true);
     try {
-      const [s, c] = await Promise.all([api.builder.schema(), api.builder.catalog()]);
+      const [s, c, l] = await Promise.all([api.builder.schema(), api.builder.catalog(), api.scenarios.labels().catch(() => ({ labels: [] }))]);
       setSchema(s);
       setCatalog(c);
+      // every scenario gets its own uuid-shaped label automatically - not useful as a suggestion here
+      setLabelCatalog((l.labels || []).filter((x) => !/^[0-9a-z]+-[0-9a-z]+-[0-9a-z]+-[0-9a-z]+-[0-9a-z]{6,}$/i.test(x)));
     } catch (e) {
       if (initial) setLoadError(e.message);
     } finally {
@@ -1526,14 +1535,14 @@ export default function CreateTestView({ active, mode = 'create' }) {
     };
   };
 
-  const startTest = async (namespace, pods = []) => {
+  const startTest = async (namespace, pods = [], exclusionLabels = ['eid']) => {
     setTestBusy(true);
     setTestError('');
     try {
       let scenario = toScenarioPayload(scenarios[activeIdx]);
       // an existing scenario's uuid label must not be reused by the throw-away draft (it would run both)
       if (explore) scenario = { ...scenario, name: '', labels: scenario.labels.filter((l) => !/^[0-9a-f]{8}-[0-9a-f]{4}-/.test(l)) };
-      const { run } = await api.builder.test({ scenario, namespace, pods });
+      const { run } = await api.builder.test({ scenario, namespace, pods, exclusionLabels });
       setLastTestNs(namespace);
       setTestRun({ id: run.id, status: run.status, exitCode: run.exitCode });
       setTestRunOf(activeTabId);
@@ -1635,7 +1644,7 @@ export default function CreateTestView({ active, mode = 'create' }) {
         <input className="input" value={sc.description} onChange={(e) => updateActive((x) => ({ ...x, description: e.target.value }))} placeholder="What this scenario proves" />
       </Field>
       <Field label="Labels" hint="A uuid label is added automatically">
-        <input className="input" value={sc.labelsText} onChange={(e) => updateActive((x) => ({ ...x, labelsText: e.target.value }))} placeholder="SEK-200300 regression-test" spellCheck={false} />
+        <ChipsInput value={parseList(sc.labelsText)} onChange={(v) => updateActive((x) => ({ ...x, labelsText: v.join(' ') }))} suggestions={labelCatalog} placeholder="SEK-200300 regression-test" />
       </Field>
       <Field label="Supported namespaces" hint="Needed to save, not to test">
         <ChipsInput invalid={detailsPrompt && missingDetails(sc).includes('namespaces')} value={sc.namespaces} onChange={(v) => updateActive((x) => ({ ...x, namespaces: v }))} suggestions={schema.namespaces} placeholder="Add namespace…" />

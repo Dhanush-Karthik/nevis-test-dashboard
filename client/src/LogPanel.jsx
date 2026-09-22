@@ -11,6 +11,55 @@ function levelOf(line) {
   return m ? m[1].toUpperCase().replace('WARNING', 'WARN') : null;
 }
 
+// Scans from `start` (an opening brace/bracket) and returns the index of its match, honoring
+// quoted strings so a "}" or "]" inside a string value doesn't end the scan early.
+function scanBalanced(s, start) {
+  const open = s[start];
+  const close = open === '{' ? '}' : ']';
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < s.length; i++) {
+    const ch = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === '\\') esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === open) depth++;
+    else if (ch === close && --depth === 0) return i;
+  }
+  return -1;
+}
+
+// pytest / requests often log a raw JSON body inline in an otherwise plain line (e.g. a request
+// or response payload). Find the first well-formed JSON object/array embedded in the line, if any,
+// so it can be pretty-printed instead of shown as one long, unreadable blob.
+function extractJson(line) {
+  if (!line || line.length > 200000) return null;
+  let from = 0;
+  for (let guard = 0; guard < 6; guard++) {
+    const rel = line.slice(from).search(/[{[]/);
+    if (rel === -1) return null;
+    const idx = from + rel;
+    const end = scanBalanced(line, idx);
+    if (end === -1) return null;
+    const candidate = line.slice(idx, end + 1);
+    if (candidate.length > 3) {
+      try {
+        const parsed = JSON.parse(candidate);
+        if (parsed && typeof parsed === 'object') {
+          return { before: line.slice(0, idx), after: line.slice(end + 1), pretty: JSON.stringify(parsed, null, 2) };
+        }
+      } catch (_) { /* not JSON after all — keep scanning past it */ }
+    }
+    from = end + 1;
+  }
+  return null;
+}
+
 const CONTEXT_WINDOWS = ['5s', '10s', '30s', '1m', '5m'].map((label, i) => ({ label: `±${label}`, value: [5000, 10000, 30000, 60000, 300000][i] }));
 const LEVELS = ['ALL', 'ERROR', 'WARN', 'INFO', 'DEBUG', 'TRACE', 'FATAL'].map((l) => ({ value: l, label: l === 'ALL' ? 'All levels' : l }));
 
@@ -25,13 +74,28 @@ function LogLine({ entry, level, onShowContext, pinned, onLinkOpen }) {
     () => rootLinks && { ...rootLinks, open: (t, s) => { onLinkOpen(entry); rootLinks.open(t, s); } },
     [rootLinks, entry, onLinkOpen]
   );
+  // only the pytest run's own output, not pod logs: a request/response body there is the one
+  // thing worth reformatting, and it should read like an ordinary (if indented) log line - no
+  // extra box, border or button, just the same text with proper line breaks.
+  const json = useMemo(() => (entry.source === 'pytest' ? extractJson(entry.line) : null), [entry.line, entry.source]);
+  const text = (s) => (links ? linkifyLine(s, links) : s);
   return (
-    <div className={`log-line lvl-${level || 'NONE'} ${entry.stream === 'stderr' ? 'stderr' : ''} ${pinned ? 'pinned' : ''}`}>
+    <div className={`log-line lvl-${level || 'NONE'} ${entry.stream === 'stderr' ? 'stderr' : ''} ${pinned ? 'pinned' : ''} ${json ? 'has-json' : ''}`}>
       <button className="log-ctx-btn" title="Show surrounding logs" aria-label="Show surrounding logs" onClick={() => onShowContext(entry)}>
         <LuExpand size={12} />
       </button>
       <span className="log-ts">{new Date(entry.ts).toLocaleTimeString()}</span>
-      <span className="log-text">{links ? linkifyLine(entry.line, links) : entry.line}</span>
+      <span className="log-text">
+        {json ? (
+          <>
+            {text(json.before)}
+            {json.pretty}
+            {text(json.after)}
+          </>
+        ) : (
+          text(entry.line)
+        )}
+      </span>
     </div>
   );
 }
