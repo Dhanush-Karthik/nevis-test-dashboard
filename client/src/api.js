@@ -112,6 +112,13 @@ export const api = {
     deployments: (cfg) => post('/api/oc/deployments', cfg),
     services: (cfg) => post('/api/oc/services', cfg),
     secrets: (cfg) => post('/api/oc/secrets', cfg),
+    restartDeployment: (cfg) => post('/api/oc/deployments/restart', cfg),
+    deletePod: (cfg) => post('/api/oc/pods/delete', cfg),
+    manifest: (cfg) => post('/api/oc/manifest', cfg),
+  },
+  output: {
+    list: (since) => fetch(`${BASE}/api/output/files?since=${since || 0}`).then(j),
+    fileUrl: (relPath) => `${BASE}/api/output/file?path=${encodeURIComponent(relPath)}`,
   },
 };
 

@@ -5,7 +5,7 @@ const { REPO_ROOT } = require('./paths'); // exits with a clear message when the
 const express = require('express');
 const cors = require('cors');
 const { WebSocketServer } = require('ws');
-const { listProjects, listPods, listDeployments, listServices, listSecretsMeta } = require('./oc');
+const { listProjects, listPods, listDeployments, listServices, listSecretsMeta, restartDeployment, deletePod, getManifest } = require('./oc');
 const { RunManager } = require('./runManager');
 const scenarioCatalog = require('./scenarioCatalog');
 const testBuilder = require('./testBuilder');
@@ -21,7 +21,11 @@ const PORT = process.env.DASHBOARD_PORT || 4570;
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '5mb' }));
+// 5mb was too tight for "Open in VS Code" on a long-running scenario: a filtered log excerpt of
+// ~20k lines already gets close to it once JSON-escaped, and the request was silently rejected
+// with a generic "Payload Too Large" before it ever reached the route. This server only ever
+// talks to the developer's own machine, so a generous ceiling here costs nothing.
+app.use(express.json({ limit: '50mb' }));
 
 // runId -> Set<ws>
 const subscribers = new Map();
@@ -112,10 +116,12 @@ app.get('/api/scenarios/resolve', (req, res) => {
   }
 });
 
-// Read-only OpenShift resource browser for the Deployments tab. Deliberately no
-// mutating routes (scale/restart/delete/edit) - this workspace's OpenShift safety
-// rules treat those as requiring explicit human approval every time, which doesn't
-// fit a shared, always-on dashboard. Secrets are metadata-only: see listSecretsMeta.
+// OpenShift resource browser for the Deployments tab. Mostly read-only; the two
+// exceptions below (restart a deployment, delete a pod) are the only mutating
+// routes, are each gated behind a confirm dialog client-side naming the exact oc
+// command before it's ever called (DeploymentsView.jsx), and go no further than
+// that - no scale, no delete-deployment, no edit. Secrets stay metadata-only: see
+// listSecretsMeta.
 app.post('/api/oc/deployments', async (req, res) => {
   const { namespace, ...cfg } = req.body || {};
   if (!namespace) return res.status(400).json({ error: 'namespace is required' });
@@ -141,6 +147,50 @@ app.post('/api/oc/secrets', async (req, res) => {
   if (!namespace) return res.status(400).json({ error: 'namespace is required' });
   try {
     res.json({ secrets: await listSecretsMeta(cfg, namespace) });
+  } catch (err) {
+    ocFail(res, err);
+  }
+});
+
+const K8S_NAME_RE = /^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/;
+const MANIFEST_KINDS = new Set(['deployment', 'pod', 'service']);
+
+// Raw YAML for the detail panel's "YAML" view. Secret is not in MANIFEST_KINDS on purpose -
+// this workspace's rule is metadata-only for Secrets (see listSecretsMeta); a full manifest
+// dump would print `.data`.
+app.post('/api/oc/manifest', async (req, res) => {
+  const { namespace, kind, name, ...cfg } = req.body || {};
+  if (!namespace || !name || !K8S_NAME_RE.test(namespace) || !K8S_NAME_RE.test(name) || !MANIFEST_KINDS.has(kind)) {
+    return res.status(400).json({ error: 'namespace, a valid name, and a supported kind are required' });
+  }
+  try {
+    res.json({ yaml: await getManifest(cfg, namespace, kind, name) });
+  } catch (err) {
+    ocFail(res, err);
+  }
+});
+
+app.post('/api/oc/deployments/restart', async (req, res) => {
+  const { namespace, name, ...cfg } = req.body || {};
+  if (!namespace || !name || !K8S_NAME_RE.test(namespace) || !K8S_NAME_RE.test(name)) {
+    return res.status(400).json({ error: 'namespace and name are required' });
+  }
+  try {
+    await restartDeployment(cfg, namespace, name);
+    res.json({ ok: true });
+  } catch (err) {
+    ocFail(res, err);
+  }
+});
+
+app.post('/api/oc/pods/delete', async (req, res) => {
+  const { namespace, name, ...cfg } = req.body || {};
+  if (!namespace || !name || !K8S_NAME_RE.test(namespace) || !K8S_NAME_RE.test(name)) {
+    return res.status(400).json({ error: 'namespace and name are required' });
+  }
+  try {
+    await deletePod(cfg, namespace, name);
+    res.json({ ok: true });
   } catch (err) {
     ocFail(res, err);
   }
@@ -349,6 +399,17 @@ app.post('/api/builder/validate', async (req, res) => {
   res.json(await testBuilder.validateWithDryRun(req.body || {}));
 });
 
+// ---- output/ artifacts a run wrote (downloaded PDFs, exported tokens/certs, screenshots, ...) ----
+const outputFiles = require('./outputFiles');
+app.get('/api/output/files', (req, res) => {
+  res.json({ files: outputFiles.list(Number(req.query.since) || 0) });
+});
+app.get('/api/output/file', (req, res) => {
+  const abs = outputFiles.resolve(req.query.path);
+  if (!abs) return res.status(404).json({ error: 'not found' });
+  res.download(abs);
+});
+
 app.get('/api/runs', (req, res) => res.json({ runs: runManager.list() }));
 
 app.get('/api/runs/:id', (req, res) => {
@@ -358,7 +419,7 @@ app.get('/api/runs/:id', (req, res) => {
 });
 
 app.post('/api/runs', (req, res) => {
-  const { env, namespace, labels, exclusionLabels, pods, ssh } = req.body || {};
+  const { env, namespace, labels, exclusionLabels, pods, ssh, keyword, replaces } = req.body || {};
   if (runActive()) return res.status(409).json({ error: 'A test is already running. Only one run at a time: wait for it to finish or stop it first.' });
   if (!namespace || !labels || !labels.length) {
     return res.status(400).json({ error: 'namespace and at least one label are required' });
@@ -369,6 +430,18 @@ app.post('/api/runs', (req, res) => {
   if ((pods || []).some((p) => !p.name || !p.namespace)) {
     return res.status(400).json({ error: 'each pod must have a name and namespace' });
   }
+  if (keyword !== undefined && (typeof keyword !== 'string' || !keyword.trim() || keyword.length > 300)) {
+    return res.status(400).json({ error: 'keyword must be a short, non-empty string' });
+  }
+  // `replaces` says this run's result should stand in for one scenario of another (the run this
+  // was re-run from) - the point of a scenario re-run. Only meaningful alongside `keyword`, and
+  // only onto a run that actually exists (Run tests' current run, or any run open in History).
+  if (replaces !== undefined) {
+    if (!keyword || typeof replaces !== 'object' || !replaces.runId || typeof replaces.scenarioName !== 'string' || !replaces.scenarioName.trim()) {
+      return res.status(400).json({ error: 'replaces requires a keyword and { runId, scenarioName }' });
+    }
+    if (!runManager.get(replaces.runId)) return res.status(400).json({ error: 'the run being replaced was not found' });
+  }
   try {
     const run = runManager.start({
       env: env === 'devtest' ? 'devtest' : 'dev',
@@ -377,6 +450,11 @@ app.post('/api/runs', (req, res) => {
       exclusionLabels: exclusionLabels || ['eid'],
       pods: pods || [],
       ssh,
+      keyword: keyword ? keyword.trim() : undefined,
+      replaces: replaces ? { runId: replaces.runId, scenarioName: replaces.scenarioName.trim() } : undefined,
+      // A keyword targets one scenario out of an already-run label set - that's a re-run, not
+      // a new top-level execution, so it's kept out of the run history list (see GET /api/runs).
+      kind: keyword ? 'scenario-rerun' : 'tests',
     });
     res.status(201).json({ run });
   } catch (err) {

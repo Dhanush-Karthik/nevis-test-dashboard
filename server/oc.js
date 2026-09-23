@@ -205,6 +205,29 @@ async function listSecretsMeta(cfg, namespace) {
   }));
 }
 
+// Full manifest for the resource detail panel's "YAML" view (ArgoCD-style). Deliberately
+// callable only for kinds that carry no secret material - see the route in index.js, which
+// is the actual gate; this allowlist is a second, defense-in-depth check against callers
+// that skip it, since it would otherwise happily print a Secret's `data`.
+const MANIFEST_KINDS = new Set(['deployment', 'pod', 'service']);
+async function getManifest(cfg, namespace, kind, name) {
+  if (!MANIFEST_KINDS.has(kind)) throw new Error(`manifest not available for kind "${kind}"`);
+  return runOcCommand(cfg, ['get', kind, name, '-n', namespace, '-o', 'yaml']);
+}
+
+// Bounces every pod of a deployment (same image, same replica count) - the standard
+// "just restart it" action. Confirmed client-side before this is ever called (see
+// DeploymentsView.jsx); scoped to this one write, not a general apply/patch/scale.
+async function restartDeployment(cfg, namespace, name) {
+  await runOcCommand(cfg, ['rollout', 'restart', `deployment/${name}`, '-n', namespace]);
+}
+
+// Deletes a single pod so its controller recreates it - used to force-restart one
+// stuck/crashing pod without touching the rest of the deployment.
+async function deletePod(cfg, namespace, name) {
+  await runOcCommand(cfg, ['delete', 'pod', name, '-n', namespace]);
+}
+
 function formatAge(iso) {
   if (!iso) return '';
   const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
@@ -219,6 +242,16 @@ function formatAge(iso) {
  * always "Running") hides a stuck/crashing container, which is the whole point
  * of glancing at this column. */
 function computePodStatus(item) {
+  // Matches `oc get pods`' own STATUS column order of precedence, so a pod mid-restart reads the
+  // same way here as it would on the CLI: deleting, then init containers, then the main ones.
+  if (item.metadata?.deletionTimestamp) return 'Terminating';
+  const initStatuses = item.status.initContainerStatuses || [];
+  for (const c of initStatuses) {
+    if (c.state?.waiting?.reason) return c.state.waiting.reason; // e.g. PodInitializing, ContainerCreating
+    if (c.state?.terminated && c.state.terminated.exitCode !== 0) return c.state.terminated.reason || 'Init:Error';
+  }
+  const doneInit = initStatuses.filter((c) => c.state?.terminated?.exitCode === 0).length;
+  if (initStatuses.length && doneInit < initStatuses.length) return `Init:${doneInit}/${initStatuses.length}`;
   for (const c of item.status.containerStatuses || []) {
     if (c.state?.waiting?.reason) return c.state.waiting.reason;
     if (c.state?.terminated?.reason && c.state.terminated.reason !== 'Completed') return c.state.terminated.reason;
@@ -297,4 +330,4 @@ function tailPodLogs(cfg, project, podName, onLine, onError) {
   };
 }
 
-module.exports = { listProjects, listPods, tailPodLogs, ocExecTarget, listDeployments, listServices, listSecretsMeta };
+module.exports = { listProjects, listPods, tailPodLogs, ocExecTarget, listDeployments, listServices, listSecretsMeta, restartDeployment, deletePod, getManifest };

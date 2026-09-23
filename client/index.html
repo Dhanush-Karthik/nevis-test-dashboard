@@ -7,6 +7,15 @@
     <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
     <link rel="icon" type="image/png" sizes="64x64" href="/favicon-64.png" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <script>
+      // Applied before first paint (not in App.jsx) so a light-themed return visit never
+      // flashes dark for a frame while React boots - same idea as the sidebar's own remembered
+      // collapsed state, just needed earlier since this one changes colours on <html> itself.
+      try {
+        var t = JSON.parse(localStorage.getItem('nevis.theme') || '"dark"');
+        if (t === 'light') document.documentElement.setAttribute('data-theme', 'light');
+      } catch (_) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

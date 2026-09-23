@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { LuFlaskConical, LuFolderTree, LuGitBranch, LuBoxes, LuTerminal, LuWaypoints, LuWorkflow, LuSettings, LuHistory, LuLoader } from 'react-icons/lu';
+import { LuFlaskConical, LuFolderOpen, LuFolderTree, LuGitBranch, LuBoxes, LuTerminal, LuWaypoints, LuWorkflow, LuSettings, LuHistory, LuLoader } from 'react-icons/lu';
+import OutputFiles from './OutputFiles.jsx';
 import { api, wsUrl } from './api.js';
 import TestsView from './TestsView.jsx';
 import DeploymentsView from './DeploymentsView.jsx';
@@ -12,7 +13,7 @@ import ScenarioFlow from './ScenarioFlow.jsx';
 import OcSessionHost from './OcSession.jsx';
 import { TracesPanel, TraceSheet, TraceLinkContext, useRunTraces } from './tracing.jsx';
 import logoUrl from './assets/nevis-logo.png';
-import { EmptyState, Segmented, StatusDot, ToastProvider } from './ui.jsx';
+import { EmptyState, Segmented, StatusDot, ToastProvider, useToast } from './ui.jsx';
 
 export const SECTIONS = {
   explorer: { label: 'Explorer', icon: LuFolderTree, render: () => <CreateTestView active mode="explore" /> },
@@ -35,7 +36,7 @@ function useRunStream(runId) {
     let cancelled = false;
     api.run(runId).then(({ run: r }) => {
       if (cancelled) return;
-      setRun({ id: r.id, status: r.status, exitCode: r.exitCode, config: r.config });
+      setRun({ id: r.id, status: r.status, exitCode: r.exitCode, config: r.config, createdAt: r.createdAt });
       setSources(r.sources || {});
       setFlow(r.flow || []);
       const ws = new WebSocket(wsUrl());
@@ -63,6 +64,7 @@ function useRunStream(runId) {
 }
 
 export function RunPopout({ runId, initialView, initialFocus = null, source, only, embedded = false }) {
+  const toast = useToast();
   const { run, sources, flow, error } = useRunStream(runId);
   const [view, setView] = useState(initialView || 'logs');
   const [tab, setTab] = useState(source || 'pytest');
@@ -84,6 +86,28 @@ export function RunPopout({ runId, initialView, initialFocus = null, source, onl
     document.title = `${only && source ? source : 'Run'} · ${runId.slice(0, 8)} — Nevis Test Dashboard`;
   }, [runId, only, source, embedded]);
 
+  // Re-run a scenario out of THIS run (History's own way in - Run tests has its own copy of this
+  // same idea). `replaces` is what makes the server persist the swap on `run.id` itself, so it
+  // shows this way (and stays this way across a refresh) wherever this run is opened from.
+  const rerunScenario = async (name) => {
+    if (!run || ['starting', 'running'].includes(run.status)) return;
+    try {
+      const cfg = run.config;
+      await api.startRun({
+        env: cfg.env,
+        namespace: cfg.namespace,
+        labels: cfg.labels,
+        exclusionLabels: cfg.exclusionLabels,
+        pods: cfg.pods || [],
+        keyword: name,
+        replaces: { runId: run.id, scenarioName: name },
+        ...(cfg.env === 'devtest' && cfg.ssh ? { ssh: cfg.ssh } : {}),
+      });
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  };
+
   if (error) return <EmptyState icon={<LuTerminal size={26} />} title="Could not open this run">{error}</EmptyState>;
   if (!run) return <EmptyState icon={<LuLoader size={24} className="spin" />} title="Connecting to the run…" />;
 
@@ -103,6 +127,7 @@ export function RunPopout({ runId, initialView, initialFocus = null, source, onl
               { value: 'logs', label: 'Logs', icon: <LuTerminal size={14} /> },
               { value: 'flow', label: 'Scenario flow', icon: <LuWorkflow size={14} />, count: flow.length || undefined },
               { value: 'traces', label: 'Traces', icon: <LuWaypoints size={14} />, count: runTraces.traces.length || undefined },
+              { value: 'output', label: 'Output', icon: <LuFolderOpen size={14} /> },
             ]}
           />
         )}
@@ -116,8 +141,10 @@ export function RunPopout({ runId, initialView, initialFocus = null, source, onl
       <TraceLinkContext.Provider value={links}>
         {view === 'traces' && !only ? (
           <TracesPanel runTraces={runTraces} focus={focus} />
+        ) : view === 'output' && !only ? (
+          <OutputFiles runId={run.id} since={run.createdAt} />
         ) : view === 'flow' && !only ? (
-          <ScenarioFlow tests={flow} pytestEntries={sources.pytest || []} />
+          <ScenarioFlow tests={flow} pytestEntries={sources.pytest || []} onRerun={only ? undefined : rerunScenario} />
         ) : names.length === 0 ? (
           <EmptyState icon={<LuTerminal size={26} />} title="Waiting for output…" />
         ) : (

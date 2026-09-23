@@ -26,7 +26,10 @@ class RunManager {
   }
 
   list() {
+    // A scenario re-run (kind: 'scenario-rerun') targets one scenario out of an already-listed
+    // run and is meant to replace its result in place there - not to show up as its own entry.
     return [...this.runs.values()]
+      .filter((r) => r.kind !== 'scenario-rerun')
       .sort((a, b) => b.createdAt - a.createdAt)
       .map((r) => this._summary(r));
   }
@@ -107,12 +110,46 @@ class RunManager {
     return run ? this._summary(run, true) : null;
   }
 
+  // Points `scenarioName` in `runId`'s flow at another run's result (a scenario re-run) -
+  // persisted on the run itself (not just held in a browser tab), so it survives a page refresh
+  // and shows the same way in every view (Run tests, History, a popped-out window). Broadcasts
+  // the merged flow right away so anyone currently watching `runId` updates immediately too.
+  setOverride(runId, scenarioName, rerunRunId) {
+    const run = this.runs.get(runId);
+    if (!run) return;
+    run.overrides.set(scenarioName, rerunRunId);
+    this._broadcastFlow(run);
+  }
+
+  _broadcastFlow(run) {
+    this.broadcast(run.id, { type: 'flow', runId: run.id, tests: this._mergedFlow(run) });
+  }
+
+  // `run.flowTracker.snapshot()`, with any scenario re-runs swapped in for the scenario they
+  // replace - same test id/position, so client-side selection stays stable, tagged `_rerun` and
+  // carrying `_ownLogs` (that re-run's OWN pytest lines - seq numbers are zero-based per run, so
+  // this must never be read against the original run's buffer). A re-run that's registered but
+  // hasn't produced a parsed test yet (just started) shows as cleared/running rather than
+  // falling back to the stale original result.
+  _mergedFlow(run) {
+    const base = run.flowTracker.snapshot();
+    if (!run.overrides.size) return base;
+    return base.map((t) => {
+      const rerunId = t.scenarioName && run.overrides.get(t.scenarioName);
+      const rr = rerunId && this.runs.get(rerunId);
+      if (!rr) return t;
+      const rt = rr.flowTracker.snapshot()[0];
+      if (!rt) return { ...t, _rerun: true, outcome: null, steps: [], startedAt: rr.createdAt, endedAt: null };
+      return { ...rt, id: t.id, _rerun: true, _ownLogs: rr.buffers.get('pytest') || [] };
+    });
+  }
+
   _summary(run, withBacklog = false) {
     const sources = {};
     for (const [name, buf] of run.buffers.entries()) {
       sources[name] = withBacklog ? buf : { count: buf.length };
     }
-    const tests = run.flowTracker.snapshot();
+    const tests = this._mergedFlow(run);
     const count = (o) => tests.filter((t) => t.outcome === o).length;
     return {
       id: run.id,
@@ -126,7 +163,7 @@ class RunManager {
       exitCode: run.exitCode,
       config: run.publicConfig,
       sources: withBacklog ? sources : Object.keys(sources),
-      ...(withBacklog ? { flow: run.flowTracker.snapshot() } : {}),
+      ...(withBacklog ? { flow: tests } : {}),
     };
   }
 
@@ -143,6 +180,14 @@ class RunManager {
     if (buf.length > MAX_LINES_PER_SOURCE) buf.shift();
     if (stream === 'log') this._noteLogTrace(run, source, entry);
     this.broadcast(run.id, { type: 'log', runId: run.id, entry });
+    // This run is standing in for a scenario in another (the original) run: every pytest line it
+    // gets - not just ones that change the parsed step structure - re-broadcasts that original
+    // run's merged flow, since `_ownLogs` (embedded in the merged test) needs to grow live too,
+    // e.g. the failure-report trailer that streams in after the PASSED/FAILED line.
+    if (run.replaces && source === 'pytest') {
+      const original = this.runs.get(run.replaces.runId);
+      if (original) this._broadcastFlow(original);
+    }
   }
 
   _noteLogTrace(run, source, entry) {
@@ -180,7 +225,7 @@ class RunManager {
 
   start(config) {
     const id = crypto.randomUUID();
-    const { env, namespace, labels, exclusionLabels, pods, ssh, onFinish, kind, title } = config;
+    const { env, namespace, labels, exclusionLabels, pods, ssh, onFinish, kind, title, keyword, replaces } = config;
 
     const run = {
       id,
@@ -195,6 +240,8 @@ class RunManager {
       logTraces: new Map(),
       kind: kind || 'tests',
       title: title || null,
+      overrides: new Map(), // scenarioName -> rerunRunId: another run's result stands in for this scenario here
+      replaces: replaces || null, // { runId, scenarioName }: this run IS such a stand-in, for that other run
       publicConfig: {
         env,
         namespace,
@@ -202,10 +249,20 @@ class RunManager {
         exclusionLabels,
         pods, // [{ name, namespace }]
         ssh: ssh ? { host: ssh.host, user: ssh.user, keyPath: ssh.keyPath } : undefined, // never store/echo passphrase
+        keyword: keyword || undefined, // set when this run re-targets a single scenario (see -k below)
       },
     };
     this._evictOld();
     this.runs.set(id, run);
+
+    // Register the override right away, before pytest has even started, so every view of the
+    // original run (Run tests, History, a page refresh) shows this scenario cleared and "running"
+    // immediately - not the previous (possibly failed) result sitting stale until this run's first
+    // line comes back. Persisted here server-side (not just in the browser) so it survives a
+    // refresh and shows up the same way in History, per the run it replaces.
+    if (replaces && replaces.runId && replaces.scenarioName) {
+      this.setOverride(replaces.runId, replaces.scenarioName, id);
+    }
 
     // Kick off pod log tailers, one per selected pod in its own oc namespace/project.
     for (const pod of pods || []) {
@@ -228,6 +285,10 @@ class RunManager {
     if (exclusionLabels && exclusionLabels.length) {
       args.push('--exclusion-labels', ...exclusionLabels);
     }
+    // Re-running a single scenario out of a labelled run: pytest's own -k keyword filter, matched
+    // against the parametrized test id (which embeds "name: <scenario name>"), so it works even for
+    // scenarios that have no unique uuid label of their own.
+    if (keyword) args.push('-k', keyword);
     const pytestBin = PYTEST_BIN;
     const proc = spawn(pytestBin, args, { cwd: REPO_ROOT, env: process.env });
     run.pytestProc = proc;
@@ -237,10 +298,14 @@ class RunManager {
     let buf = '';
     const handleLine = (line) => {
       const seq = run.seqs.get(pytestSource) || 0; // seq _appendLine is about to assign
+      // Ingest before appending: _appendLine (below) also re-broadcasts this run's own flow to
+      // whatever original run it replaces (see `run.replaces`), and that must see this line's
+      // effect on the flow tracker's state - not lag it by one line - or a re-run whose last
+      // pytest line IS the outcome (the common, no-failure-report case) would broadcast one
+      // update behind and never show as finished until something else happened to trigger another.
+      const changed = run.flowTracker.ingest(line, seq);
       this._appendLine(run, pytestSource, 'log', line);
-      if (run.flowTracker.ingest(line, seq)) {
-        this.broadcast(id, { type: 'flow', runId: id, tests: run.flowTracker.snapshot() });
-      }
+      if (changed) this.broadcast(id, { type: 'flow', runId: id, tests: run.flowTracker.snapshot() });
     };
     const handle = (chunk) => {
       buf += chunk.toString();

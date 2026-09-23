@@ -2,15 +2,19 @@ import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { api, wsUrl } from './api.js';
 import LogPanel from './LogPanel.jsx';
 import ScenarioFlow from './ScenarioFlow.jsx';
-import { LuCircleAlert, LuHistory, LuLoader, LuPanelLeftClose, LuPanelLeftOpen, LuPlay, LuRefreshCw, LuSearch, LuServer, LuSquare, LuSquareArrowOutUpRight, LuTags, LuTerminal, LuWorkflow } from 'react-icons/lu';
+import { LuCircleAlert, LuFileText, LuFolderOpen, LuHistory, LuLoader, LuPanelLeftClose, LuPanelLeftOpen, LuPlay, LuRefreshCw, LuSearch, LuServer, LuSquare, LuSquareArrowOutUpRight, LuTags, LuTerminal, LuWorkflow } from 'react-icons/lu';
+import OutputFiles from './OutputFiles.jsx';
 import AusweisAppControl from './AusweisAppControl.jsx';
+import ReportFlow from './Report.jsx';
 import { TracesPanel, TraceSheet, TraceLinkContext, useRunTraces } from './tracing.jsx';
 import { LuWaypoints } from 'react-icons/lu';
 import { useOnOcLogin } from './OcSession.jsx';
 import { openPopout, setActiveRun, shortcutLabel } from './popout.js';
 import { Checkbox, Combobox, EmptyState, Field, IconButton, Sash, Section, MenuButton, Segmented, Select, usePanelSize, useLocalState, useToast, StatusDot } from './ui.jsx';
+import { nsCacheKey, podCacheKey, readCache, writeCache } from './clusterCache.js';
 
 const DEBOUNCE_MS = 450;
+const finished = (r) => r && !['starting', 'running'].includes(r.status);
 
 function parseList(text) {
   return text
@@ -34,9 +38,21 @@ function useDebounced(value, delay) {
   return debounced;
 }
 
+// A dev's chosen "which namespaces/pods to tail logs from" is cluster-wide housekeeping, not part
+// of any one test run - restore it from where they left it instead of making them re-check the
+// same boxes every time they open Run tests.
+function loadStoredKeys(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? new Set(JSON.parse(raw)) : new Set();
+  } catch (_) {
+    return new Set();
+  }
+}
+
 export default function TestsView() {
   const toast = useToast();
-  const [env, setEnv] = useState('dev');
+  const [env, setEnv] = useLocalState('tests.env', 'dev');
   const [labelsText, setLabelsText] = useState('');
   const [exclusionText, setExclusionText] = useState('eid');
   const [namespace, setNamespace] = useState('');
@@ -52,22 +68,31 @@ export default function TestsView() {
 
   const [nsFilter, setNsFilter] = useState('');
   const [podFilter, setPodFilter] = useState('');
-  const [allNamespaces, setAllNamespaces] = useState([]);
-  const [selectedNamespaces, setSelectedNamespaces] = useState(new Set());
+  const [allNamespaces, setAllNamespaces] = useState(() => readCache(nsCacheKey(env)) || []);
+  const [selectedNamespaces, setSelectedNamespaces] = useState(() => loadStoredKeys('nevis.tests.selectedNamespaces'));
   const [nsLoading, setNsLoading] = useState(false);
   const [nsError, setNsError] = useState('');
 
   const [pods, setPods] = useState([]);
-  const [selectedPods, setSelectedPods] = useState(new Set());
+  const [selectedPods, setSelectedPods] = useState(() => loadStoredKeys('nevis.tests.selectedPods'));
   const [podsLoading, setPodsLoading] = useState(false);
   const [podsError, setPodsError] = useState('');
+
+  useEffect(() => {
+    try { localStorage.setItem('nevis.tests.selectedNamespaces', JSON.stringify([...selectedNamespaces])); } catch (_) { /* storage unavailable */ }
+  }, [selectedNamespaces]);
+  useEffect(() => {
+    try { localStorage.setItem('nevis.tests.selectedPods', JSON.stringify([...selectedPods])); } catch (_) { /* storage unavailable */ }
+  }, [selectedPods]);
 
   const [runs, setRuns] = useState([]);
   const [currentRun, setCurrentRun] = useState(null); // {id, status, exitCode, config}
   const [sources, setSources] = useState({}); // sourceName -> entries[]
-  const [flow, setFlow] = useState([]);
+  const [flow, setFlow] = useState([]); // scenario re-runs already swapped in server-side - see runManager's `_mergedFlow`
+  const rerunOutcomes = useRef({}); // scenarioName -> last-seen outcome of its re-run, just to toast on a transition
   const [activeTab, setActiveTab] = useState('pytest');
   const [mainView, setMainView] = useState('flow'); // 'flow' | 'logs' | 'traces'
+  const [reportOpen, setReportOpen] = useState(false);
   const [starting, setStarting] = useState(false);
   const [traceFocus, setTraceFocus] = useState(null);
   const [traceSheet, setTraceSheet] = useState(null); // trace peek that slides over the current view
@@ -129,16 +154,37 @@ export default function TestsView() {
     };
   }, [debouncedLabels, debouncedExclusion]);
 
+  // A namespace/pod list barely changes, so it's cached (see clusterCache.js) and reused as-is -
+  // fetchNamespaces/fetchPods only hit the cluster on first-ever use, an explicit refresh
+  // (`force: true`), or when a fetch actually fails (a real sign the cache is stale).
   const fetchNamespaces = useCallback(
-    async (autoSelect) => {
+    async (autoSelect, { force = false } = {}) => {
+      const key = nsCacheKey(env);
+      if (!force) {
+        const cached = readCache(key);
+        if (cached) {
+          setAllNamespaces(cached);
+          setNsError('');
+          if (autoSelect && cached.includes(autoSelect)) setSelectedNamespaces(new Set([autoSelect]));
+          return;
+        }
+      }
       setNsError('');
       setNsLoading(true);
       try {
         const cfg = { env, ...(env === 'devtest' ? { ssh: sshCfg() } : {}) };
         const { projects } = await api.projects(cfg);
         setAllNamespaces(projects);
+        writeCache(key, projects);
         if (autoSelect && projects.includes(autoSelect)) {
           setSelectedNamespaces(new Set([autoSelect]));
+        } else {
+          // A fresh fetch is authoritative - drop any selected namespace that's gone, instead of
+          // leaving a ghost selection with no checkbox to ever uncheck it from.
+          setSelectedNamespaces((prev) => {
+            const pruned = new Set([...prev].filter((ns) => projects.includes(ns)));
+            return pruned.size === prev.size ? prev : pruned;
+          });
         }
       } catch (err) {
         setNsError(err.message);
@@ -149,8 +195,14 @@ export default function TestsView() {
     [env, sshHost, sshUser, sshKeyPath, sshPassphrase]
   );
 
-  // Step 2 of the auto-chain: once a test namespace is picked, go find the
-  // matching oc project(s) automatically instead of waiting for a manual click.
+  // Reloads from that environment's own cache (not the network) the moment the Environment
+  // dropdown changes, so switching dev <-> devtest shows what was last seen there instantly.
+  useEffect(() => {
+    setAllNamespaces(readCache(nsCacheKey(env)) || []);
+  }, [env]);
+
+  // Step 2 of the auto-chain: once a test namespace is picked, go find the matching oc project(s)
+  // automatically - cache-first, so this is instant once anything has been fetched before.
   useEffect(() => {
     if (!namespace) return;
     setNsFilter(namespace);
@@ -167,40 +219,70 @@ export default function TestsView() {
     });
   };
 
-  const fetchPods = useCallback(async () => {
-    if (selectedNamespaces.size === 0) {
-      setPods([]);
-      return;
-    }
-    setPodsError('');
-    setPodsLoading(true);
-    try {
-      const cfg = { env, namespaces: [...selectedNamespaces], ...(env === 'devtest' ? { ssh: sshCfg() } : {}) };
-      const { pods, errors } = await api.pods(cfg);
-      setPods(pods);
-      if (errors && errors.length) {
-        setPodsError(errors.map((e) => `${e.namespace}: ${e.message}`).join('; '));
+  const fetchPods = useCallback(
+    async ({ force = false } = {}) => {
+      if (selectedNamespaces.size === 0) {
+        setPods([]);
+        return;
       }
-    } catch (err) {
-      setPodsError(err.message);
-    } finally {
-      setPodsLoading(false);
-    }
+      const nsList = [...selectedNamespaces];
+      const toFetch = force ? nsList : nsList.filter((ns) => readCache(podCacheKey(env, ns)) === null);
+      const fromCache = nsList.filter((ns) => !toFetch.includes(ns)).flatMap((ns) => readCache(podCacheKey(env, ns)) || []);
+      if (!toFetch.length) {
+        setPods(fromCache);
+        setPodsError('');
+        return;
+      }
+      setPodsError('');
+      setPodsLoading(true);
+      try {
+        const cfg = { env, namespaces: toFetch, ...(env === 'devtest' ? { ssh: sshCfg() } : {}) };
+        const { pods: fetched, errors } = await api.pods(cfg);
+        for (const ns of toFetch) writeCache(podCacheKey(env, ns), fetched.filter((p) => p.namespace === ns));
+        setPods([...fromCache, ...fetched]);
+        // A namespace just (re)fetched is authoritative now - drop any selected pod in it that
+        // isn't there anymore (rescheduled under a new name, or gone), instead of leaving a ghost
+        // selection with no checkbox to ever uncheck it from.
+        const freshKeys = new Set(fetched.map((p) => podKey(p.namespace, p.name)));
+        setSelectedPods((prev) => {
+          const pruned = new Set([...prev].filter((k) => !toFetch.includes(k.split('::')[0]) || freshKeys.has(k)));
+          return pruned.size === prev.size ? prev : pruned;
+        });
+        if (errors && errors.length) {
+          setPodsError(errors.map((e) => `${e.namespace}: ${e.message}`).join('; '));
+        }
+      } catch (err) {
+        setPodsError(err.message);
+      } finally {
+        setPodsLoading(false);
+      }
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [env, sshHost, sshUser, sshKeyPath, sshPassphrase, selectedNamespaces]);
+    [env, sshHost, sshUser, sshKeyPath, sshPassphrase, selectedNamespaces]
+  );
 
-  // Step 3 of the auto-chain: pods load themselves the moment a namespace is
-  // checked - no separate "fetch pods" click required.
+  // Step 3 of the auto-chain: pods load themselves the moment a namespace is checked - no
+  // separate "fetch pods" click required. Cache-first (see fetchPods), so re-checking a namespace
+  // whose pods are already cached is instant, no network round trip.
   useEffect(() => {
     const t = setTimeout(() => fetchPods(), 200);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedNamespaces, env]);
 
-  // after logging in again, reload what the expired login could not fetch
+  // Namespaces/pods restored from a previous session (see loadStoredKeys above) still need
+  // something to render the checkboxes against - cache-first, so this only reaches the network
+  // the very first time the dashboard is used.
+  useEffect(() => {
+    if (!namespace) fetchNamespaces();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // after logging in again, reload what the expired login could not fetch - a real sign
+  // whatever's cached needs a fresh look, so this bypasses the cache.
   useOnOcLogin(() => {
-    fetchNamespaces();
-    fetchPods();
+    fetchNamespaces(undefined, { force: true });
+    fetchPods({ force: true });
   });
 
   const togglePod = (namespace, name) => {
@@ -215,6 +297,7 @@ export default function TestsView() {
 
   const connectWs = useCallback((runId, initialSources, initialFlow) => {
     wsRef.current?.close();
+    rerunOutcomes.current = {};
     setSources(initialSources || {});
     setFlow(initialFlow || []);
     const ws = new WebSocket(wsUrl());
@@ -262,7 +345,7 @@ export default function TestsView() {
         ...(env === 'devtest' ? { ssh: sshCfg() } : {}),
       };
       const { run } = await api.startRun(config);
-      setCurrentRun({ id: run.id, status: run.status, exitCode: run.exitCode, config: run.config });
+      setCurrentRun({ id: run.id, status: run.status, exitCode: run.exitCode, config: run.config, createdAt: run.createdAt });
       setActiveTab('pytest');
       setMainView('flow');
       connectWs(run.id, run.sources, run.flow);
@@ -279,9 +362,48 @@ export default function TestsView() {
     await api.stopRun(currentRun.id);
   };
 
+  // Re-runs one scenario out of the current run (pytest's own -k, matched against the scenario's
+  // name) as its own background run, `replaces`-linked to it - the server persists that link on
+  // the current run itself and swaps the result into its flow (see runManager's `_mergedFlow`),
+  // cleared to "running" the instant it's registered, then live as the re-run progresses, same as
+  // any other flow update over this run's existing subscription.
+  const rerunScenario = async (name) => {
+    if (!currentRun || running) return;
+    try {
+      const cfg = currentRun.config;
+      await api.startRun({
+        env: cfg.env,
+        namespace: cfg.namespace,
+        labels: cfg.labels,
+        exclusionLabels: cfg.exclusionLabels,
+        pods: cfg.pods || [],
+        keyword: name,
+        replaces: { runId: currentRun.id, scenarioName: name },
+        ...(cfg.env === 'devtest' ? { ssh: sshCfg() } : {}),
+      });
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  };
+
+  // Toast once a re-run visible in `flow` (via the websocket subscription above) settles - a
+  // pure side effect of the outcome changing, not something this view drives itself.
+  useEffect(() => {
+    for (const t of flow) {
+      if (!t._rerun || !t.scenarioName) continue;
+      const prev = rerunOutcomes.current[t.scenarioName];
+      if (prev !== undefined && prev === null && t.outcome !== null) {
+        toast(`Re-run finished: ${t.scenarioName} — ${t.outcome}`, t.outcome === 'passed' ? 'ok' : 'error');
+      }
+      rerunOutcomes.current[t.scenarioName] = t.outcome;
+    }
+  }, [flow, toast]);
+
+  const anyRerunning = flow.some((t) => t._rerun && t.outcome === null);
+
   const openHistoricalRun = async (id) => {
     const { run } = await api.run(id);
-    setCurrentRun({ id: run.id, status: run.status, exitCode: run.exitCode, config: run.config });
+    setCurrentRun({ id: run.id, status: run.status, exitCode: run.exitCode, config: run.config, createdAt: run.createdAt });
     setActiveTab('pytest');
     connectWs(run.id, run.sources, run.flow);
   };
@@ -310,6 +432,12 @@ export default function TestsView() {
     (acc[p.namespace] = acc[p.namespace] || []).push(p);
     return acc;
   }, {});
+  // A cached list can go stale on its own (a namespace removed, a pod rescheduled under a new
+  // name) without any fetch ever failing - flagged here instead, so it's visible at a glance
+  // rather than only discovered when a run actually tries to tail a pod that's gone.
+  const staleNamespaces = allNamespaces.length ? [...selectedNamespaces].filter((ns) => !allNamespaces.includes(ns)) : [];
+  const knownPodKeys = new Set(pods.map((p) => podKey(p.namespace, p.name)));
+  const stalePods = podsLoading ? [] : [...selectedPods].filter((k) => !knownPodKeys.has(k));
 
   const running = currentRun && (currentRun.status === 'running' || currentRun.status === 'starting');
 
@@ -321,7 +449,7 @@ export default function TestsView() {
     if (!currentRun) return;
     if (!openPopout(`run-${currentRun.id}-${key}`, { kind: 'run', run: currentRun.id, ...params })) toast('The browser blocked the new window. Allow pop-ups for this site and try again.', 'error');
   };
-  const canRun = namespace.trim() && parseList(labelsText).length > 0 && !starting;
+  const canRun = namespace.trim() && parseList(labelsText).length > 0 && !starting && !anyRerunning;
 
   return (
     <div className="view">
@@ -388,14 +516,20 @@ export default function TestsView() {
 
               <Field
                 label="Cluster namespaces"
-                hint="OC projects whose pods can be tailed."
-                right={<IconButton size="xs" icon={<LuRefreshCw size={13} className={nsLoading ? 'spin' : ''} />} title="Refresh namespaces" onClick={() => fetchNamespaces()} disabled={nsLoading} />}
+                hint="OC projects whose pods can be tailed. Remembered - refresh only if one you need is missing."
+                right={<IconButton size="xs" icon={<LuRefreshCw size={13} className={nsLoading ? 'spin' : ''} />} title="Refresh from the cluster" onClick={() => fetchNamespaces(undefined, { force: true })} disabled={nsLoading} />}
               >
                 <div className="search-box">
                   <LuSearch size={14} className="search-box-icon" />
                   <input value={nsFilter} onChange={(e) => setNsFilter(e.target.value)} placeholder="Filter namespaces" spellCheck={false} />
                 </div>
                 {nsError && <div className="text-danger small">{nsError}</div>}
+                {staleNamespaces.length > 0 && (
+                  <div className="notice warn small">
+                    <LuCircleAlert size={13} />
+                    <div>{staleNamespaces.join(', ')} {staleNamespaces.length === 1 ? "isn't" : "aren't"} in the cluster's project list anymore — hit refresh above.</div>
+                  </div>
+                )}
                 <div className="check-list">
                   {visibleNamespaces.map((ns) => (
                     <Checkbox key={ns} className="check-row" checked={selectedNamespaces.has(ns)} onChange={() => toggleNamespace(ns)} label={ns} />
@@ -405,8 +539,23 @@ export default function TestsView() {
                 </div>
               </Field>
 
-              <Field label="Pods to tail" right={podsLoading && <LuLoader size={13} className="spin muted" />}>
+              <Field
+                label="Pods to tail"
+                hint="Remembered per namespace - refresh only if a pod you tailed before is missing."
+                right={
+                  <>
+                    {podsLoading && <LuLoader size={13} className="spin muted" />}
+                    <IconButton size="xs" icon={<LuRefreshCw size={13} />} title="Refresh from the cluster" onClick={() => fetchPods({ force: true })} disabled={podsLoading || !selectedNamespaces.size} />
+                  </>
+                }
+              >
                 {podsError && <div className="text-danger small">{podsError}</div>}
+                {stalePods.length > 0 && (
+                  <div className="notice warn small">
+                    <LuCircleAlert size={13} />
+                    <div>{stalePods.length} tailed pod{stalePods.length === 1 ? '' : 's'} no longer {stalePods.length === 1 ? 'exists' : 'exist'} (likely rescheduled) — hit refresh above.</div>
+                  </div>
+                )}
                 <div className="search-box">
                   <LuSearch size={14} className="search-box-icon" />
                   <input value={podFilter} onChange={(e) => setPodFilter(e.target.value)} placeholder="Filter pods" spellCheck={false} />
@@ -468,6 +617,7 @@ export default function TestsView() {
               { value: 'flow', label: 'Scenario flow', icon: <LuWorkflow size={14} />, count: flow.length || undefined },
               { value: 'logs', label: 'Logs', icon: <LuTerminal size={14} /> },
               { value: 'traces', label: 'Traces', icon: <LuWaypoints size={14} />, count: runTraces.traces.length || undefined },
+              { value: 'output', label: 'Output', icon: <LuFolderOpen size={14} /> },
             ]}
           />
           <span className="spacer" />
@@ -497,6 +647,11 @@ export default function TestsView() {
               ]}
             />
           )}
+          {finished(currentRun) && (
+            <button type="button" className="btn sm" onClick={() => setReportOpen(true)} disabled={anyRerunning} title={anyRerunning ? 'Wait for the scenario re-run to finish first' : 'Build a print-ready PDF of this run, for a ticket or release mail'}>
+              <LuFileText size={14} /> Generate report <span className="badge">Beta</span>
+            </button>
+          )}
           {running ? (
             <button type="button" className="btn danger" onClick={stopRun}>
               <LuSquare size={13} /> Stop
@@ -513,12 +668,18 @@ export default function TestsView() {
         <TraceLinkContext.Provider value={traceLinks}>
         {mainView === 'traces' ? (
           <TracesPanel runTraces={runTraces} focus={traceFocus} />
+        ) : mainView === 'output' ? (
+          currentRun ? <OutputFiles runId={currentRun.id} since={currentRun.createdAt} /> : (
+            <EmptyState icon={<LuFolderOpen size={26} />} title="No run selected">
+              Configure the run on the left and press <b>Run tests</b> to see what it wrote to output/.
+            </EmptyState>
+          )
         ) : tabNames.length === 0 ? (
           <EmptyState icon={<LuTerminal size={26} />} title="No run selected">
             Configure the run on the left and press <b>Run tests</b> to stream logs here in real time.
           </EmptyState>
         ) : mainView === 'flow' ? (
-          <ScenarioFlow tests={flow} pytestEntries={sources.pytest || []} />
+          <ScenarioFlow tests={flow} pytestEntries={sources.pytest || []} onRerun={rerunScenario} />
         ) : (
           <>
             <div className="subtabs">
@@ -547,6 +708,7 @@ export default function TestsView() {
             onExpand={() => { setTraceFocus({ ...traceSheet, nonce: Date.now() }); setMainView('traces'); setTraceSheet(null); }}
           />
         )}
+        {reportOpen && currentRun && <ReportFlow run={currentRun} onClose={() => setReportOpen(false)} />}
       </section>
     </div>
   );

@@ -40,7 +40,7 @@ const shortId = (id) => (id && id.length > 14 ? `${id.slice(0, 8)}…${id.slice(
 
 // No blue on purpose (dashboard theme): muted, distinguishable hues.
 const PALETTE = ['#5fbf82', '#e0af68', '#c78be8', '#ef8f6b', '#7ccfc0', '#d98fb4', '#b5c86a', '#e6c84f', '#9aa0aa'];
-const colorFor = (name) => {
+export const colorFor = (name) => {
   let h = 0;
   for (const c of String(name)) h = (h * 31 + c.charCodeAt(0)) >>> 0;
   return PALETTE[h % PALETTE.length];
@@ -169,7 +169,7 @@ export function useRunTraces(runId, status) {
 /* Service graph                                                        */
 /* ------------------------------------------------------------------ */
 
-const UPSTREAM = '__upstream__';
+export const UPSTREAM = '__upstream__';
 const NODE_W = 200;
 const NODE_H = 68;
 const COL_GAP = 130;
@@ -537,18 +537,19 @@ function useDragScroll() {
 /* Sequence diagram                                                     */
 /* ------------------------------------------------------------------ */
 
-const SEQ = { gutter: 92, col: 240, row: 52, top: 20, head: 74, box: { w: 184, h: 60 } };
-const SEQ_TONE = { ok: '#5fbf82', warn: '#e0af68', bad: '#ef6b6b', none: '#9a9aa4' };
-const tone = (c) => (c.failed ? 'bad' : c.status !== null && c.status >= 300 ? 'warn' : c.status !== null ? 'ok' : 'none');
-const clip = (t, px, per = 6.2) => {
+export const SEQ = { gutter: 92, col: 240, row: 52, top: 20, head: 74, box: { w: 184, h: 60 } };
+export const SEQ_TONE = { ok: '#5fbf82', warn: '#e0af68', bad: '#ef6b6b', none: '#9a9aa4' };
+export const tone = (c) => (c.failed ? 'bad' : c.status !== null && c.status >= 300 ? 'warn' : c.status !== null ? 'ok' : 'none');
+export const clip = (t, px, per = 6.2) => {
   const n = Math.max(4, Math.floor(px / per));
   return t.length > n ? `${t.slice(0, n - 1)}…` : t;
 };
-const isExt = (k) => String(k).startsWith('ext:');
+export const isExt = (k) => String(k).startsWith('ext:');
 
 // Every hop becomes a request + response pair in time order: calls between components, calls out to things that export
 // no spans (databases, brokers, other services: "external"), and optionally a component's own internal steps.
-function buildSequence(spans, opts) {
+// `minDurationUs` (report use only) additionally drops trivial/near-instant calls - not "main" requests.
+export function buildSequence(spans, opts) {
   const byId = new Map(spans.map((s) => [s.spanId, s]));
   const kids = new Map();
   for (const s of spans) if (s.parentId && byId.has(s.parentId)) (kids.get(s.parentId) || kids.set(s.parentId, []).get(s.parentId)).push(s);
@@ -567,7 +568,9 @@ function buildSequence(spans, opts) {
       internal.push({ service: s.service, span: s, start: s.startUs, end: s.startUs + s.durUs });
     }
   }
-  const calls = all.filter((c) => (c.external ? opts.external : true)).sort((a, b) => a.start - b.start);
+  const calls = all
+    .filter((c) => (c.external ? opts.external : true) && (opts.minDurationUs ? c.call.durUs >= opts.minDurationUs : true))
+    .sort((a, b) => a.start - b.start);
   // internal steps: skip the trivial ones, keep the slow and the failed, cap the noise
   const steps = opts.internal ? internal.filter((i) => i.span.error || i.span.durUs >= 500).sort((a, b) => a.start - b.start).slice(0, 60) : [];
   const parts = [];
@@ -666,6 +669,112 @@ function SeqDetail({ c, label, onShowSpan, traceId, expanded, onToggleExpand, on
   );
 }
 
+export const seqDims = (seq) => ({ width: SEQ.gutter + seq.parts.length * SEQ.col, height: SEQ.top * 2 + seq.events.length * SEQ.row });
+
+// The diagram itself (service header row + svg lifelines/messages), with no toolbar and no drag-to-pan -
+// shared by the interactive SequenceDiagram (Traces tab) and the static report renderer, so the two
+// never drift apart. `onSelect` is optional: omit it for a plain, non-interactive render.
+export function SequenceCanvas({ seq, t0, stats, sel, onSelect }) {
+  const { parts, calls, steps, events, level } = seq;
+  const { width, height } = seqDims(seq);
+  const cx = (k) => SEQ.gutter + parts.indexOf(k) * SEQ.col + SEQ.col / 2;
+  const ry = (r) => SEQ.top + r * SEQ.row + SEQ.row / 2;
+  const label = (k) => (k === UPSTREAM ? 'Caller' : isExt(k) ? calls.find((c) => c.to === k)?.extLabel || k.slice(4) : k);
+  const color = (k) => (k === UPSTREAM ? '#5b5b63' : isExt(k) ? '#7a7a84' : colorFor(k));
+  return (
+    <>
+      <div className="seq-head" style={{ width, height: SEQ.head }}>
+        {parts.map((k) => {
+          const st = stats.get(k);
+          return (
+            <div key={k} className={`seq-part ${k === UPSTREAM ? 'client' : ''} ${isExt(k) ? 'ext' : ''} ${st?.errors ? 'err' : ''}`} style={{ left: cx(k) - SEQ.box.w / 2, width: SEQ.box.w, height: SEQ.box.h, '--svc': color(k) }} title={k === UPSTREAM ? 'The caller: its spans were never exported to Tempo (the pytest client or a gateway in front of the first component)' : isExt(k) ? 'Called by a component but exports no spans (database, broker or another service)' : k}>
+              <span className="seq-part-bar" />
+              <span className="seq-part-name">{label(k)}</span>
+              <span className="seq-part-sub">
+                {k === UPSTREAM ? 'not exported' : isExt(k) ? calls.find((c) => c.to === k)?.extKind : [st?.version && `v${st.version}`, st?.host].filter(Boolean).join(' · ') || 'component'}
+              </span>
+              {st && <span className="seq-part-sub">{st.spans} span{st.spans === 1 ? '' : 's'}{st.errors ? <em className="text-danger"> · {st.errors} error{st.errors === 1 ? '' : 's'}</em> : ''}</span>}
+            </div>
+          );
+        })}
+      </div>
+      <svg width={width} height={height} className="seq-svg">
+        <defs>
+          {Object.entries(SEQ_TONE).map(([k, c]) => (
+            <marker key={k} id={`seq-${k}`} markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+              <path d="M0,0 L10,5 L0,10 Z" fill={c} />
+            </marker>
+          ))}
+        </defs>
+        {parts.map((k) => <line key={k} x1={cx(k)} x2={cx(k)} y1={0} y2={height} className="seq-life" stroke={color(k)} />)}
+        {calls.map((c) => {
+          const lv = level.get(c) || 0;
+          const y1 = ry(c.reqRow) + 8;
+          const y2 = ry(c.resRow) + 8;
+          return <rect key={`a${c.n}`} x={cx(c.to) - 5 + lv * 6} y={y1 - 3} width={10} height={Math.max(8, y2 - y1 + 6)} rx={3} className={`seq-act ${tone(c.call) === 'bad' ? 'bad' : ''}`} style={{ '--svc': color(c.to) }} />;
+        })}
+        {events.filter((e) => e.kind !== 'self').map((e) => {
+          const c = e.c;
+          const tn = tone(c.call);
+          const y = ry(e.row) + 8;
+          const isReq = e.kind === 'req';
+          const lvTo = level.get(c) || 0;
+          const dirReq = cx(c.to) >= cx(c.from) ? 1 : -1;
+          const edgeTo = cx(c.to) + lvTo * 6 + (dirReq > 0 ? -5 : 5);
+          const srcX = cx(c.from) + dirReq * 5;
+          const x1 = isReq ? srcX : edgeTo;
+          const x2 = isReq ? edgeTo : srcX;
+          const dir = x2 >= x1 ? 1 : -1;
+          const len = Math.abs(x2 - x1);
+          const f = c.facts;
+          const l1 = isReq
+            ? `${c.call.method ? `${c.call.method} ` : ''}${c.call.path}`
+            : `${c.call.status !== null ? `${c.call.status} ${STATUS_TEXT[c.call.status] || ''}`.trim() : c.call.failed ? 'error' : 'done'} · ${fmtDur(c.call.durUs)}`;
+          const l2 = (isReq
+            ? [f.hostPort || c.call.peer, f.queryKeys.length ? `?${f.queryKeys.slice(0, 3).join('&')}${f.queryKeys.length > 3 ? '…' : ''}` : null, f.reqType && String(f.reqType).split(';')[0], f.reqSize != null ? fmtBytes(f.reqSize) : null, f.inFlightUs != null && f.inFlightUs > 0 ? `${fmtDur(f.inFlightUs)} in flight` : null]
+            : [f.resType && String(f.resType).split(';')[0], f.resSize != null ? fmtBytes(f.resSize) : null, c.external ? null : `${fmtDur(c.selfUs)} own work`, f.backUs != null && f.backUs > 0 ? `${fmtDur(f.backUs)} back` : null]
+          ).filter(Boolean).join(' · ');
+          const mid = (x1 + x2) / 2;
+          const active = sel === c.n;
+          return (
+            <g key={`${e.kind}${c.n}`} className={`seq-msg ${active ? 'sel' : ''} ${onSelect ? '' : 'static'}`} onClick={onSelect ? () => onSelect(active ? null : c.n) : undefined}>
+              <rect x={Math.min(x1, x2)} y={y - 30} width={Math.max(len, 8)} height={40} className="seq-hit" />
+              <line x1={x1} y1={y} x2={x2 - dir} y2={y} className={`seq-line ${isReq ? 'req' : 'res'}`} stroke={SEQ_TONE[tn]} markerEnd={`url(#seq-${tn})`} />
+              <text x={mid} y={y - 18} textAnchor="middle" className={`seq-label ${isReq ? 'req' : 'res'}`} fill={isReq ? undefined : SEQ_TONE[tn]}>
+                <title>{`${l1}${l2 ? `\n${l2}` : ''}${c.call.url && isReq ? `\n${c.call.url}` : ''}${!isReq && c.call.message ? `\n${c.call.message}` : ''}`}</title>
+                {clip(l1, len - 34)}
+              </text>
+              {l2 && <text x={mid} y={y - 6} textAnchor="middle" className="seq-label sub">{clip(l2, len - 34, 5.6)}</text>}
+              <g transform={`translate(${x1 + dir * 12},${y})`} className="seq-num">
+                <circle r={7.5} fill="var(--surface)" stroke={SEQ_TONE[tn]} />
+                <text y={3.4} textAnchor="middle">{c.n}</text>
+              </g>
+              {!isReq && c.call.failed && (
+                <g className="seq-note" transform={`translate(${Math.max(SEQ.gutter, Math.min(width - 262, Math.min(x1, x2) + 14))},${y + 6})`}>
+                  <rect width={250} height={20} rx={6} />
+                  <text x={8} y={13.5}>{clip(`✕ ${c.call.message || (c.call.status !== null ? `HTTP ${c.call.status} ${STATUS_TEXT[c.call.status] || ''}` : 'error')}`, 236, 6)}</text>
+                </g>
+              )}
+            </g>
+          );
+        })}
+        {events.filter((e) => e.kind === 'self').map((e) => {
+          const st = e.st;
+          const x = cx(st.service) + 6;
+          const y = ry(e.row);
+          return (
+            <g key={`self${e.n}`} className={`seq-self ${st.span.error ? 'bad' : ''}`}>
+              <path d={`M${x},${y - 6} h26 v14 h-26`} fill="none" markerEnd={`url(#seq-${st.span.error ? 'bad' : 'none'})`} />
+              <text x={x + 34} y={y + 3}>{clip(`${st.span.name} · ${fmtDur(st.span.durUs)}`, SEQ.col / 2 - 46, 5.8)}<title>{`${st.span.name}\n${fmtDur(st.span.durUs)}${st.span.statusMessage ? `\n${st.span.statusMessage}` : ''}`}</title></text>
+            </g>
+          );
+        })}
+        {events.map((e) => <text key={`t${e.kind}${e.c ? e.c.n : `s${e.n}`}`} x={SEQ.gutter - 12} y={ry(e.row) + 11} textAnchor="end" className={`seq-time ${e.kind}`}>+{fmtDur(e.t - t0)}</text>)}
+      </svg>
+    </>
+  );
+}
+
 function SequenceDiagram({ trace, onShowSpan }) {
   const [internalOn, setInternalOn] = useLocalState('trace.seq.internal', false);
   const [externalOn, setExternalOn] = useLocalState('trace.seq.external', true);
@@ -676,7 +785,7 @@ function SequenceDiagram({ trace, onShowSpan }) {
   useEffect(() => setSel(null), [trace]);
   useEffect(() => setDetailExpanded(false), [sel]);
   const t0 = trace.summary.startUs;
-  const { parts, calls, steps, events, level, counts } = seq;
+  const { parts, calls, steps, counts } = seq;
   const stats = useMemo(() => {
     const m = new Map();
     for (const s of trace.spans) {
@@ -692,12 +801,8 @@ function SequenceDiagram({ trace, onShowSpan }) {
   if (!calls.length && !steps.length) return <EmptyState icon={<LuNetwork size={24} />} title="No calls between components">This trace has spans from a single component only.</EmptyState>;
   calls.forEach((c) => { c.t0 = t0; });
 
-  const cx = (k) => SEQ.gutter + parts.indexOf(k) * SEQ.col + SEQ.col / 2;
-  const ry = (r) => SEQ.top + r * SEQ.row + SEQ.row / 2;
-  const width = SEQ.gutter + parts.length * SEQ.col;
-  const height = SEQ.top * 2 + events.length * SEQ.row;
+  const { width } = seqDims(seq);
   const label = (k) => (k === UPSTREAM ? 'Caller' : isExt(k) ? calls.find((c) => c.to === k)?.extLabel || k.slice(4) : k);
-  const color = (k) => (k === UPSTREAM ? '#5b5b63' : isExt(k) ? '#7a7a84' : colorFor(k));
   const failed = calls.filter((c) => c.call.failed).length;
   const slowest = calls.reduce((m, c) => (!m || c.call.durUs > m.call.durUs ? c : m), null);
   const selected = calls.find((c) => c.n === sel) || null;
@@ -717,94 +822,7 @@ function SequenceDiagram({ trace, onShowSpan }) {
       </div>
       <div className="seq-scroll" ref={panRef} title="Drag to pan">
         <div className="seq-inner" style={{ width, minWidth: '100%' }}>
-          <div className="seq-head" style={{ width, height: SEQ.head }}>
-            {parts.map((k) => {
-              const st = stats.get(k);
-              return (
-                <div key={k} className={`seq-part ${k === UPSTREAM ? 'client' : ''} ${isExt(k) ? 'ext' : ''} ${st?.errors ? 'err' : ''}`} style={{ left: cx(k) - SEQ.box.w / 2, width: SEQ.box.w, height: SEQ.box.h, '--svc': color(k) }} title={k === UPSTREAM ? 'The caller: its spans were never exported to Tempo (the pytest client or a gateway in front of the first component)' : isExt(k) ? 'Called by a component but exports no spans (database, broker or another service)' : k}>
-                  <span className="seq-part-bar" />
-                  <span className="seq-part-name">{label(k)}</span>
-                  <span className="seq-part-sub">
-                    {k === UPSTREAM ? 'not exported' : isExt(k) ? calls.find((c) => c.to === k)?.extKind : [st?.version && `v${st.version}`, st?.host].filter(Boolean).join(' · ') || 'component'}
-                  </span>
-                  {st && <span className="seq-part-sub">{st.spans} span{st.spans === 1 ? '' : 's'}{st.errors ? <em className="text-danger"> · {st.errors} error{st.errors === 1 ? '' : 's'}</em> : ''}</span>}
-                </div>
-              );
-            })}
-          </div>
-          <svg width={width} height={height} className="seq-svg">
-            <defs>
-              {Object.entries(SEQ_TONE).map(([k, c]) => (
-                <marker key={k} id={`seq-${k}`} markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
-                  <path d="M0,0 L10,5 L0,10 Z" fill={c} />
-                </marker>
-              ))}
-            </defs>
-            {parts.map((k) => <line key={k} x1={cx(k)} x2={cx(k)} y1={0} y2={height} className="seq-life" stroke={color(k)} />)}
-            {calls.map((c) => {
-              const lv = level.get(c) || 0;
-              const y1 = ry(c.reqRow) + 8;
-              const y2 = ry(c.resRow) + 8;
-              return <rect key={`a${c.n}`} x={cx(c.to) - 5 + lv * 6} y={y1 - 3} width={10} height={Math.max(8, y2 - y1 + 6)} rx={3} className={`seq-act ${tone(c.call) === 'bad' ? 'bad' : ''}`} style={{ '--svc': color(c.to) }} />;
-            })}
-            {events.filter((e) => e.kind !== 'self').map((e) => {
-              const c = e.c;
-              const tn = tone(c.call);
-              const y = ry(e.row) + 8;
-              const isReq = e.kind === 'req';
-              const lvTo = level.get(c) || 0;
-              const dirReq = cx(c.to) >= cx(c.from) ? 1 : -1;
-              const edgeTo = cx(c.to) + lvTo * 6 + (dirReq > 0 ? -5 : 5);
-              const srcX = cx(c.from) + dirReq * 5;
-              const x1 = isReq ? srcX : edgeTo;
-              const x2 = isReq ? edgeTo : srcX;
-              const dir = x2 >= x1 ? 1 : -1;
-              const len = Math.abs(x2 - x1);
-              const f = c.facts;
-              const l1 = isReq
-                ? `${c.call.method ? `${c.call.method} ` : ''}${c.call.path}`
-                : `${c.call.status !== null ? `${c.call.status} ${STATUS_TEXT[c.call.status] || ''}`.trim() : c.call.failed ? 'error' : 'done'} · ${fmtDur(c.call.durUs)}`;
-              const l2 = (isReq
-                ? [f.hostPort || c.call.peer, f.queryKeys.length ? `?${f.queryKeys.slice(0, 3).join('&')}${f.queryKeys.length > 3 ? '…' : ''}` : null, f.reqType && String(f.reqType).split(';')[0], f.reqSize != null ? fmtBytes(f.reqSize) : null, f.inFlightUs != null && f.inFlightUs > 0 ? `${fmtDur(f.inFlightUs)} in flight` : null]
-                : [f.resType && String(f.resType).split(';')[0], f.resSize != null ? fmtBytes(f.resSize) : null, c.external ? null : `${fmtDur(c.selfUs)} own work`, f.backUs != null && f.backUs > 0 ? `${fmtDur(f.backUs)} back` : null]
-              ).filter(Boolean).join(' · ');
-              const mid = (x1 + x2) / 2;
-              const active = sel === c.n;
-              return (
-                <g key={`${e.kind}${c.n}`} className={`seq-msg ${active ? 'sel' : ''}`} onClick={() => setSel(active ? null : c.n)}>
-                  <rect x={Math.min(x1, x2)} y={y - 30} width={Math.max(len, 8)} height={40} className="seq-hit" />
-                  <line x1={x1} y1={y} x2={x2 - dir} y2={y} className={`seq-line ${isReq ? 'req' : 'res'}`} stroke={SEQ_TONE[tn]} markerEnd={`url(#seq-${tn})`} />
-                  <text x={mid} y={y - 18} textAnchor="middle" className={`seq-label ${isReq ? 'req' : 'res'}`} fill={isReq ? undefined : SEQ_TONE[tn]}>
-                    <title>{`${l1}${l2 ? `\n${l2}` : ''}${c.call.url && isReq ? `\n${c.call.url}` : ''}${!isReq && c.call.message ? `\n${c.call.message}` : ''}`}</title>
-                    {clip(l1, len - 34)}
-                  </text>
-                  {l2 && <text x={mid} y={y - 6} textAnchor="middle" className="seq-label sub">{clip(l2, len - 34, 5.6)}</text>}
-                  <g transform={`translate(${x1 + dir * 12},${y})`} className="seq-num">
-                    <circle r={7.5} fill="var(--surface)" stroke={SEQ_TONE[tn]} />
-                    <text y={3.4} textAnchor="middle">{c.n}</text>
-                  </g>
-                  {!isReq && c.call.failed && (
-                    <g className="seq-note" transform={`translate(${Math.max(SEQ.gutter, Math.min(width - 262, Math.min(x1, x2) + 14))},${y + 6})`}>
-                      <rect width={250} height={20} rx={6} />
-                      <text x={8} y={13.5}>{clip(`✕ ${c.call.message || (c.call.status !== null ? `HTTP ${c.call.status} ${STATUS_TEXT[c.call.status] || ''}` : 'error')}`, 236, 6)}</text>
-                    </g>
-                  )}
-                </g>
-              );
-            })}
-            {events.filter((e) => e.kind === 'self').map((e) => {
-              const st = e.st;
-              const x = cx(st.service) + 6;
-              const y = ry(e.row);
-              return (
-                <g key={`self${e.n}`} className={`seq-self ${st.span.error ? 'bad' : ''}`}>
-                  <path d={`M${x},${y - 6} h26 v14 h-26`} fill="none" markerEnd={`url(#seq-${st.span.error ? 'bad' : 'none'})`} />
-                  <text x={x + 34} y={y + 3}>{clip(`${st.span.name} · ${fmtDur(st.span.durUs)}`, SEQ.col / 2 - 46, 5.8)}<title>{`${st.span.name}\n${fmtDur(st.span.durUs)}${st.span.statusMessage ? `\n${st.span.statusMessage}` : ''}`}</title></text>
-                </g>
-              );
-            })}
-            {events.map((e) => <text key={`t${e.kind}${e.c ? e.c.n : `s${e.n}`}`} x={SEQ.gutter - 12} y={ry(e.row) + 11} textAnchor="end" className={`seq-time ${e.kind}`}>+{fmtDur(e.t - t0)}</text>)}
-          </svg>
+          <SequenceCanvas seq={seq} t0={t0} stats={stats} sel={sel} onSelect={setSel} />
         </div>
       </div>
       {selected && (

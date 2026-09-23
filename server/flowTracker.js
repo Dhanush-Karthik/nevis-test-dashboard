@@ -182,7 +182,12 @@ class ScenarioFlowTracker {
     const outcomeMatch = line.trim().match(OUTCOME_RE);
     if (outcomeMatch) {
       const outcome = outcomeMatch[1].toLowerCase();
-      this._closeAction(seq - 1);
+      // Deliberately NOT closing the open action here: on a failure, pytest's own failure report
+      // (the captured-log/traceback replay) prints *after* this PASSED/FAILED line, and often
+      // contains exactly the detail worth seeing (the failing request/response body, assertion
+      // message, ...). Leaving the action open lets that trailing output keep counting as part of
+      // it instead of being cut off right at the outcome line. It still gets closed for real once
+      // the next test starts (see the TEST_NODE_RE branch above) or the run ends.
       this.currentTest.outcome = outcome;
       this.currentTest.endedAt = Date.now();
       this._finishRunningStep(this.currentTest, outcome === 'passed' ? 'done' : 'failed');

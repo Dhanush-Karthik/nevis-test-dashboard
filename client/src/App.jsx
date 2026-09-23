@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { LuBoxes, LuFlaskConical, LuFolderTree, LuGitBranch, LuHistory, LuMenu, LuSearch, LuSettings, LuSquareArrowOutUpRight } from 'react-icons/lu';
+import { LuBoxes, LuFlaskConical, LuFolderTree, LuGitBranch, LuHistory, LuMenu, LuMoon, LuSearch, LuSettings, LuSquareArrowOutUpRight, LuSun } from 'react-icons/lu';
 import TestsView from './TestsView.jsx';
 import DeploymentsView from './DeploymentsView.jsx';
 import CreateTestView from './CreateTestView.jsx';
@@ -40,6 +40,14 @@ function AppInner() {
   const [storedSection, setSection] = useLocalState('section', 'explorer');
   const section = storedSection === 'defaults' || storedSection === 'env' ? 'settings' : storedSection === 'create' ? 'explorer' : storedSection; // tabs merged into Settings / Explorer
   const [collapsed, setCollapsed] = useLocalState('navCollapsed', false);
+  // The dark palette above is the default (untouched :root) - data-theme is only ever set to
+  // 'light', both here and in index.html's pre-paint bootstrap (see that file for why it needs to
+  // run there too), so the two can't disagree about what "no attribute" means.
+  const [theme, setTheme] = useLocalState('theme', 'dark');
+  useEffect(() => {
+    if (theme === 'light') document.documentElement.setAttribute('data-theme', 'light');
+    else document.documentElement.removeAttribute('data-theme');
+  }, [theme]);
   const [searchOpen, setSearchOpen] = useState(false);
   const [badges, setBadges] = useState({ history: 0, git: 0 });
   // jump to a search result: switch tab, then tell that view what to show
@@ -137,6 +145,15 @@ function AppInner() {
             <button
               type="button"
               className="icon-btn md nav-toggle"
+              onClick={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}
+              title={theme === 'light' ? 'Switch to dark theme' : 'Switch to light theme'}
+              aria-label="Toggle theme"
+            >
+              {theme === 'light' ? <LuMoon size={17} /> : <LuSun size={17} />}
+            </button>
+            <button
+              type="button"
+              className="icon-btn md nav-toggle"
               onClick={() => setCollapsed((c) => !c)}
               title={collapsed ? 'Expand sidebar (Ctrl/⌘ B)' : 'Collapse sidebar (Ctrl/⌘ B)'}
               aria-label="Toggle sidebar"
@@ -156,6 +173,7 @@ function AppInner() {
                 <button
                   type="button"
                   className={`nav-item ${section === id ? 'active' : ''}`}
+                  data-nav={id}
                   onClick={() => setSection(id)}
                   title={collapsed ? label : undefined}
                   aria-current={section === id ? 'page' : undefined}

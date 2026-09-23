@@ -5,6 +5,73 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Generate report (Run tests only).** Once a labelled run finishes, **Generate report** builds a print-ready document meant for a
+  ticket or release mail: an editable title and optional free-text description, a cover with the run's environment/labels/exclusion
+  labels and pass/fail summary, a per-scenario results table, and a detail section per scenario that opens with its whole sequence
+  at a glance (every workflow/endpoint interaction it ran, in order, and where it stopped if it failed) before the existing
+  per-step "main requests only" sequence diagrams (database calls, other external calls and trivially short calls are left out),
+  and a failure-details section (with an optional raw pytest log excerpt). Every section is a checkbox, all on by default. A failed
+  scenario can be marked **manually passed** for the report, with a reason shown in the document — this only changes what the
+  report says; the run's real status, History and badges are untouched. The preview is the document itself, shown as one
+  continuous sheet exactly as it prints — "Download PDF" hands that same markup to the browser's own print-to-PDF, so there's
+  nothing to drift between what you see and what gets attached. Labelled **Beta**.
+- **Light theme.** A sun/moon toggle at the top of the sidebar switches the whole dashboard between the existing dark theme and a
+  new light one (remembered across reloads); dark stays the default and is pixel-identical to before.
+- **Copy an action's log.** Each action under a workflow step in Scenario flow now has a copy icon that copies just its captured
+  pytest lines to the clipboard.
+- **Re-run a single scenario.** In Scenario flow, any scenario (passed or failed) has a **Re-run** button that re-executes only that
+  one (pytest's own `-k`, matched against the scenario's name, so it works even for scenarios sharing labels with others in the run).
+  Clicking it clears that scenario's steps and log right away and then visibly replaces it in place, live, as the re-run progresses.
+  The result is persisted server-side against the run it replaces, so it's still there - the same way - after a page refresh, in
+  **Run history**, and in **Generate report**; it's not a separate entry there, and only one run (the main one or a re-run) executes
+  at a time. **Re-run also works from History now**, not just Run tests' own live view, against any run kept there.
+- **Multiple scenarios in one file.** The Explorer's scenario switcher can now add (and remove a not-yet-saved) scenario to the
+  currently open file, not just step between the ones already in it — so a new ticket file isn't limited to a single scenario.
+- **Deployment controls & detail side panel.** Selecting a resource in the Deployments tree now opens a side panel (ArgoCD-style)
+  instead of a card at the bottom of the page, showing its health, version and other metadata without scrolling, plus a **YAML** tab
+  with its full manifest (`oc get ... -o yaml`) — not for Secrets, which stay metadata-only. The panel can **restart** a deployment
+  (`oc rollout restart`) and **delete** a pod (its controller recreates it), each behind a confirm dialog naming the exact `oc`
+  command and target before it runs, the same way the eID simulator control is confirmed. Everything else stays read-only. The tree
+  now also keeps polling on its own, live, for as long as anything is mid-transition (a pod initializing after a restart or delete,
+  for instance) - the same "settling" behavior ArgoCD shows - instead of a one-off snapshot that has to be manually refreshed.
+- A blank **Workflow** starter (pick any flow) alongside the existing blank **Endpoint interaction** one.
+- **Drag-select multiple blocks on the board**, then copy them (⌘/Ctrl+C, or the Properties panel's new **Copy** button) and paste
+  (⌘/Ctrl+V) into any scenario — including one on a different tab. Delete now also removes a whole drag-selected group at once.
+- **Output files tab.** Run tests, History (and a popped-out run window), and the Explorer's scenario test dock all get a new
+  **Output** tab next to Scenario flow/Logs/Traces, listing whatever a run wrote under `output/` (downloaded PDFs, exported
+  tokens/certs, screenshots, ...) with a size and a download link for each.
+
+### Fixed
+- A failed scenario's last action, in Scenario flow, no longer cuts off right at the PASSED/FAILED line — pytest's own failure
+  report (captured log / traceback, often the actual failing request and response body) prints *after* that line and is now kept
+  as part of the action instead of being dropped.
+- A scenario re-run's result (passed or failed) no longer reverts back to the original, stale result after a page refresh.
+- A pod initializing after a restart or delete no longer reads as unhealthy while it's still coming up - `Pending`,
+  `ContainerCreating`, `PodInitializing`, `Init:N/M` and `Terminating` (and a `Running` pod whose containers aren't all ready yet) now
+  correctly show as **progressing**, not degraded.
+- **Report layout was badly broken.** The report has been rebuilt as a single continuous sheet instead of an on-screen A4-paged
+  preview - the sequence diagrams could render wider than their own card and spill past its border, and the raw pytest log
+  excerpt could silently truncate to its on-screen scroll height when printed instead of showing in full.
+- **Namespace / pod-to-tail selections are now remembered and no longer re-fetched on their own** - in Run tests and in the
+  Explorer's Test scenario dialog alike. Previously every reopen (and every namespace ticked) re-fetched the cluster's project
+  and pod lists and made a dev recheck the same boxes; the fetched lists and the dev's own selection (any number of namespaces,
+  not just the test's own one) are now both cached (per environment, pods per namespace), so opening either one is instant and a
+  multi-namespace pick survives a rerun. Nothing is fetched again on its own unless there's no cache yet - a manual refresh, or a
+  selected namespace/pod actually going missing (deleted, or a pod rescheduled under a new name), is what re-fetches from here on;
+  a small warning appears in place the moment that's noticed, and hitting refresh both re-fetches and drops the now-gone selection
+  so it doesn't sit there as a silent ghost. The Explorer's Test scenario dialog also now matches Run tests' own behavior: the OC
+  project named like the scenario's test namespace is ticked automatically the first time nothing's been picked yet, and changing
+  the "Run against namespace" dropdown mid-dialog drops the old namespace/pod pick and lands on the new one, instead of leaving
+  pod tailing pointed at a namespace that's no longer being tested.
+- **"Open in VS Code" failed on a long scenario's logs** (silently, past roughly 20k lines) — the server's request body limit
+  (5mb) was too tight for a filtered log excerpt that size once JSON-escaped. Raised to 50mb.
+- **Deployments no longer needs a manual refresh** to reflect a status change — it already polled continuously while something was
+  visibly mid-transition; it now also polls on a slower baseline the rest of the time, so anything that changes on its own (a
+  crash, someone else's deploy) still shows up without hitting refresh.
+- The current run's status pill (Run tests / Scenario flow toolbar) no longer wraps onto a second line and spills out of its own
+  rounded border when the toolbar gets tight — it stays on one line and ellipsizes instead.
+
 ## [1.3.0] - 2026-09-22
 
 ### Added

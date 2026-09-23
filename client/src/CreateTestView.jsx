@@ -6,6 +6,7 @@ import { TracesPanel, TraceSheet, TraceLinkContext, useRunTraces } from './traci
 import FileTree from './FileTree.jsx';
 import PodPicker, { podsFromKeys } from './PodPicker.jsx';
 import AusweisAppControl from './AusweisAppControl.jsx';
+import OutputFiles from './OutputFiles.jsx';
 import { openPopout, setActiveRun, shortcutLabel } from './popout.js';
 import {
   LuChevronDown, LuChevronRight, LuCircleAlert, LuCog, LuLayoutGrid, LuLoader, LuMaximize2, LuMinimize2, LuPanelBottomClose, LuPanelLeftClose,
@@ -31,6 +32,7 @@ const TEMPLATES = [
   { id: 'login-stepup-eid', group: 'Workflows', kind: 'workflow', title: 'Step-up login (eID)', hint: 'method_ident: eid', def: { name: 'stepup-eid', flow: 'login', method_ident: 'eid', eid_card: 'user_matching', acr_values: 'gematik-ehealth-loa-high', expected_tokens: ['access-token'] } },
   { id: 'register-device', group: 'Workflows', kind: 'workflow', title: 'Register device', hint: 'new device, four-fields', def: { name: 'register-device', flow: 'register-device', method_ident: 'four-fields', device_registration_case: 'new_device', expected_tokens: ['access-token'] } },
   { id: 'register-device-otp', group: 'Workflows', kind: 'workflow', title: 'Register device (OTP)', hint: 'forgot PIN, method_ident: otp', def: { name: 'device-registration-otp', flow: 'register-device', method_ident: 'otp', device_registration_case: 'forgot_pin', expected_tokens: ['access-token'] } },
+  { id: 'workflow', group: 'Workflows', kind: 'workflow', title: 'Workflow', hint: 'blank - pick any flow', def: { name: 'workflow', flow: '' } },
   { id: 'endpoint', group: 'Endpoints', kind: 'endpoint', title: 'Endpoint interaction', hint: 'single HTTP call', def: { name: 'endpoint-call', host: 'idp', endpoint: '/', method: 'GET', auth_config: { type: 'none' }, expected_status_code: 200 } },
   { id: 'ep-change-email', group: 'Endpoints', kind: 'endpoint', title: 'Change email', hint: 'POST /change-email', def: { name: 'change-email', host: 'idp', endpoint: '/change-email', method: 'POST', auth_config: { type: 'token' }, expected_status_code: 200 } },
   { id: 'ep-introspect', group: 'Endpoints', kind: 'endpoint', title: 'Introspect access token', hint: 'POST /oauth/introspect', def: { name: 'introspect-access-token', host: 'idbroker', endpoint: '/oauth/introspect', method: 'POST', auth_config: { type: 'none' }, headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: { token: '<file:output/access_token>' }, expected_status_code: 200 } },
@@ -417,7 +419,7 @@ function YamlEditor({ scenario, focusName, onApply, onError }) {
   );
 }
 
-function Inspector({ node, schema, onChange, onDelete }) {
+function Inspector({ node, schema, onChange, onDelete, onCopy }) {
   const [customKey, setCustomKey] = useState('');
   if (!node) {
     return (
@@ -454,6 +456,9 @@ function Inspector({ node, schema, onChange, onDelete }) {
         <span className="muted"><KindIcon kind={node.kind} /></span>
         <span className="card-title">{node.kind === 'workflow' ? 'Workflow' : 'Endpoint interaction'}</span>
         <span className="spacer" />
+        <button type="button" className="btn sm" onClick={onCopy} title="Copy this block (⌘/Ctrl+C) - paste it into any scenario with ⌘/Ctrl+V">
+          <LuCopy size={13} /> Copy
+        </button>
         <button type="button" className="btn sm danger-ghost" onClick={onDelete}>
           <LuTrash2 size={13} /> Delete
         </button>
@@ -1019,7 +1024,20 @@ function ConfirmModal({ title, children, confirm, danger, onConfirm, onClose }) 
 
 function TestModal({ scenario, namespaces, defaultNamespace, busy, error, onRun, onClose }) {
   const [ns, setNs] = useState(defaultNamespace);
-  const [podKeys, setPodKeys] = useState(new Set());
+  // Remembered across modal opens, same as PodPicker's own namespace choice (see PodPicker.jsx) -
+  // a dev who switched pod tailing on and ticked pods once shouldn't have to redo that next time.
+  const [tailOn, setTailOn] = useLocalState('podpicker.on', false);
+  const [podKeys, setPodKeys] = useState(() => {
+    try {
+      const raw = localStorage.getItem('nevis.podpicker.pods');
+      return raw ? new Set(JSON.parse(raw)) : new Set();
+    } catch (_) {
+      return new Set();
+    }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('nevis.podpicker.pods', JSON.stringify([...podKeys])); } catch (_) { /* storage unavailable */ }
+  }, [podKeys]);
   const [exclusion, setExclusion] = useState('eid');
   return (
     <Modal
@@ -1030,7 +1048,7 @@ function TestModal({ scenario, namespaces, defaultNamespace, busy, error, onRun,
       footer={
         <>
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
-          <button type="button" className="btn primary" disabled={busy || !ns} onClick={() => onRun(ns, podsFromKeys(podKeys), parseList(exclusion))}>
+          <button type="button" className="btn primary" disabled={busy || !ns} onClick={() => onRun(ns, tailOn ? podsFromKeys(podKeys) : [], parseList(exclusion))}>
             {busy ? <LuLoader size={14} className="spin" /> : <LuPlay size={14} />}
             {busy ? 'Starting…' : 'Run test'}
           </button>
@@ -1052,7 +1070,7 @@ function TestModal({ scenario, namespaces, defaultNamespace, busy, error, onRun,
         <Field label="Exclusion labels">
           <input className="input" value={exclusion} onChange={(e) => setExclusion(e.target.value)} placeholder="eid" spellCheck={false} />
         </Field>
-        <PodPicker testNamespace={ns} value={podKeys} onChange={setPodKeys} />
+        <PodPicker testNamespace={ns} on={tailOn} onToggle={setTailOn} value={podKeys} onChange={setPodKeys} />
         <AusweisAppControl />
         <div className="notice warn">
           <LuCircleAlert size={15} />
@@ -1112,6 +1130,7 @@ function TestRunPanel({ onPopout, run, flow, sources, tab, setTab, traces, trace
               { value: 'flow', label: 'Scenario flow' },
               { value: 'logs', label: Object.keys(sources).length > 1 ? 'Logs' : 'pytest logs', count: Object.keys(sources).length > 1 ? Object.keys(sources).length : undefined },
               { value: 'traces', label: 'Traces', count: traces.traces.length || undefined },
+              { value: 'output', label: 'Output' },
             ]}
           />
         )}
@@ -1132,6 +1151,8 @@ function TestRunPanel({ onPopout, run, flow, sources, tab, setTab, traces, trace
             <ScenarioFlow tests={flow} pytestEntries={sources.pytest || []} />
           ) : tab === 'traces' ? (
             <TracesPanel runTraces={traces} focus={traceFocus} />
+          ) : tab === 'output' ? (
+            <OutputFiles runId={run.id} since={run.createdAt} />
           ) : (
             <DockLogs sources={sources} />
           )}
@@ -1220,6 +1241,10 @@ export default function CreateTestView({ active, mode = 'create' }) {
   const [saveChangesOpen, setSaveChangesOpen] = useState(false);
   const [activeIdx, setActiveIdx] = useState(0);
   const [selectedId, setSelectedId] = useState(null);
+  const [multiSelected, setMultiSelected] = useState(new Set()); // block ids picked with a drag-select rectangle, for copy/delete as a group
+  const [marquee, setMarquee] = useState(null); // { x, y, w, h } in canvas coords, while a drag-select rectangle is being drawn
+  const didMarqueeRef = useRef(false); // suppresses the plain "click empty canvas -> open add-block picker" behavior right after a drag-select
+  const clipboardRef = useRef(null); // { nodes: [{kind, def, dx, dy}], edges: [[i, j]] } - a relative copy, pasted into whichever scenario is active
   const [view, setView] = useState('board'); // 'board' | 'yaml'
   const [yamlFocus, setYamlFocus] = useState(null);
   const [yamlError, setYamlError] = useState('');
@@ -1544,7 +1569,7 @@ export default function CreateTestView({ active, mode = 'create' }) {
       if (explore) scenario = { ...scenario, name: '', labels: scenario.labels.filter((l) => !/^[0-9a-f]{8}-[0-9a-f]{4}-/.test(l)) };
       const { run } = await api.builder.test({ scenario, namespace, pods, exclusionLabels });
       setLastTestNs(namespace);
-      setTestRun({ id: run.id, status: run.status, exitCode: run.exitCode });
+      setTestRun({ id: run.id, status: run.status, exitCode: run.exitCode, createdAt: run.createdAt });
       setTestRunOf(activeTabId);
       setTestFlow([]);
       setTestSources({});
@@ -1764,10 +1789,86 @@ export default function CreateTestView({ active, mode = 'create' }) {
     updateActive((s) => ({ ...s, nodes: s.nodes.filter((n) => n.id !== id), edges: s.edges.filter((e) => e.from !== id && e.to !== id) }));
     setSelectedId(null);
   };
+  const deleteNodes = (ids) => {
+    updateActive((s) => ({ ...s, nodes: s.nodes.filter((n) => !ids.has(n.id)), edges: s.edges.filter((e) => !ids.has(e.from) && !ids.has(e.to)) }));
+    setSelectedId(null);
+    setMultiSelected(new Set());
+  };
+
+  // Cmd/Ctrl+C on whatever's selected (a drag-selected group, or the single Properties-panel
+  // node) stores a relative copy - positions offset from the group's own top-left corner, and
+  // only the edges that run between two copied blocks - so it can be dropped into any scenario,
+  // including one on a different tab, at whatever position it lands.
+  const copySelection = () => {
+    const ids = multiSelected.size ? multiSelected : selectedId ? new Set([selectedId]) : null;
+    if (!ids || !ids.size) return;
+    const nodes = sc.nodes.filter((n) => ids.has(n.id));
+    if (!nodes.length) return;
+    const minX = Math.min(...nodes.map((n) => n.x));
+    const minY = Math.min(...nodes.map((n) => n.y));
+    const indexById = new Map(nodes.map((n, i) => [n.id, i]));
+    const edges = sc.edges.filter((e) => indexById.has(e.from) && indexById.has(e.to)).map((e) => [indexById.get(e.from), indexById.get(e.to)]);
+    clipboardRef.current = {
+      nodes: nodes.map((n) => ({ kind: n.kind, def: clone(n.def), dx: n.x - minX, dy: n.y - minY })),
+      edges,
+    };
+    toast(`Copied ${nodes.length} block${nodes.length === 1 ? '' : 's'} — switch scenario and press ⌘/Ctrl+V to paste`);
+  };
+  const pasteSelection = () => {
+    const clip = clipboardRef.current;
+    if (!clip || !clip.nodes.length) return;
+    updateActive((s) => {
+      const base = nextSlot(s.nodes);
+      const created = clip.nodes.map((c) => {
+        const d = clone(c.def);
+        d.name = uniqueName(d.name, s.nodes, d);
+        const node = { id: uid(), kind: c.kind, def: d, origin: null, x: snap(base.x + c.dx), y: snap(base.y + c.dy) };
+        s = { ...s, nodes: [...s.nodes, node] }; // so uniqueName sees names already claimed by this same paste
+        return node;
+      });
+      const edges = clip.edges.map(([i, j]) => ({ from: created[i].id, to: created[j].id }));
+      setMultiSelected(new Set(created.map((n) => n.id)));
+      setSelectedId(null);
+      toast(`Pasted ${created.length} block${created.length === 1 ? '' : 's'}`);
+      return { ...s, edges: [...s.edges, ...edges] };
+    });
+  };
+
+  // A plain click on empty canvas opens the add-block picker (see the board's onClick below); a
+  // click-and-drag instead rubber-bands a selection rectangle over whatever blocks it covers, so
+  // several blocks can be copied or deleted together instead of one at a time.
+  const startMarquee = (e) => {
+    if (e.button !== 0) return;
+    const startPt = canvasPoint(e.clientX, e.clientY);
+    let active = false;
+    const move = (ev) => {
+      const pt = canvasPoint(ev.clientX, ev.clientY);
+      const dx = pt.x - startPt.x;
+      const dy = pt.y - startPt.y;
+      if (!active && Math.hypot(dx, dy) < 4) return;
+      active = true;
+      setMarquee({ x: Math.min(startPt.x, pt.x), y: Math.min(startPt.y, pt.y), w: Math.abs(dx), h: Math.abs(dy) });
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      if (!active) return;
+      didMarqueeRef.current = true;
+      setMarquee((rect) => {
+        const hit = sc.nodes.filter((n) => n.x < rect.x + rect.w && n.x + NODE_W > rect.x && n.y < rect.y + rect.h && n.y + NODE_H > rect.y);
+        setMultiSelected(new Set(hit.map((n) => n.id)));
+        setSelectedId(null);
+        return null;
+      });
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  };
 
   const startDrag = (e, node) => {
     if (e.button !== 0) return;
     setSelectedId(node.id);
+    setMultiSelected(new Set());
     const start = { mx: e.clientX, my: e.clientY, x: node.x, y: node.y };
     const move = (ev) =>
       updateActive((s) => ({
@@ -1815,14 +1916,30 @@ export default function CreateTestView({ active, mode = 'create' }) {
 
   useEffect(() => {
     const onKey = (e) => {
-      if (e.key !== 'Delete' && e.key !== 'Backspace') return;
       if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
-      if (selectedId) deleteNode(selectedId);
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (multiSelected.size) deleteNodes(multiSelected);
+        else if (selectedId) deleteNode(selectedId);
+        return;
+      }
+      if (!(e.metaKey || e.ctrlKey)) return;
+      if (e.key === 'c' || e.key === 'C') {
+        copySelection();
+      } else if (e.key === 'v' || e.key === 'V') {
+        e.preventDefault(); // don't also let a stray paste land in whatever's focused
+        pasteSelection();
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId, activeIdx]);
+  }, [selectedId, multiSelected, activeIdx]);
+
+  // Selecting is per-scenario, but the clipboard (a ref) deliberately survives switching tabs -
+  // that's what makes "copy in scenario A, paste into scenario B" work.
+  useEffect(() => {
+    setMultiSelected(new Set());
+  }, [activeIdx]);
 
   if (loadError) return <EmptyState icon={<LuCircleAlert size={26} />} title="Could not load building blocks">{loadError}</EmptyState>;
   if (!schema || !catalog) return <EmptyState icon={<LuLoader size={24} className="spin" />} title="Loading building blocks…" />;
@@ -1930,6 +2047,20 @@ export default function CreateTestView({ active, mode = 'create' }) {
             />
             <IconButton size="sm" icon={<LuChevronRight size={15} />} title="Next scenario" disabled={activeIdx >= scenarios.length - 1} onClick={() => { setActiveIdx(activeIdx + 1); setSelectedId(null); }} />
             <span className="scen-count">{scenarios.length ? `${activeIdx + 1} of ${scenarios.length}` : ''}</span>
+            <IconButton
+              size="sm"
+              icon={<LuPlus size={15} />}
+              title="Add another scenario to this file"
+              onClick={() => { setScenarios((a) => [...a, newScenario(a.length + 1)]); setActiveIdx(scenarios.length); setSelectedId(null); }}
+            />
+            {scenarios.length > 1 && activeScenario?.origIndex == null && (
+              <IconButton
+                size="sm"
+                icon={<LuTrash2 size={13} />}
+                title="Remove this (not-yet-saved) scenario"
+                onClick={() => { setScenarios((a) => a.filter((_, k) => k !== activeIdx)); setActiveIdx((i) => Math.max(0, i - 1)); setSelectedId(null); }}
+              />
+            )}
           </div>
         ) : (
         <div className="doc-tabs">
@@ -2041,7 +2172,7 @@ export default function CreateTestView({ active, mode = 'create' }) {
                 <IconButton size="sm" icon={<LuX size={15} />} title="Close" onClick={() => { setSelectedId(null); setDetailsOpen(false); setDetailsPrompt(false); }} />
               </div>
               <div className="panel-scroll">
-                {selected ? <Inspector node={selected} schema={schema} onChange={setNode} onDelete={() => selected && deleteNode(selected.id)} /> : renderDetails()}
+                {selected ? <Inspector node={selected} schema={schema} onChange={setNode} onDelete={() => selected && deleteNode(selected.id)} onCopy={copySelection} /> : renderDetails()}
               </div>
             </div>
           )}
@@ -2058,10 +2189,12 @@ export default function CreateTestView({ active, mode = 'create' }) {
               style={{ width: canvasW, height: canvasH }}
               onDragOver={(e) => e.preventDefault()}
               onDrop={onDrop}
+              onPointerDown={(e) => { if (e.target === canvasRef.current) startMarquee(e); }}
               onClick={(e) => {
+                if (didMarqueeRef.current) { didMarqueeRef.current = false; return; } // just finished drag-selecting - not a click
                 if (e.target !== canvasRef.current) return;
                 if (picker) { setPicker(null); return; }
-                if (selectedId || detailsOpen) { setSelectedId(null); setDetailsOpen(false); setDetailsPrompt(false); return; }
+                if (selectedId || detailsOpen || multiSelected.size) { setSelectedId(null); setDetailsOpen(false); setDetailsPrompt(false); setMultiSelected(new Set()); return; }
                 if (explore && !file) return;
                 const pt = canvasPoint(e.clientX, e.clientY);
                 openPicker({ at: { x: pt.x - NODE_W / 2, y: pt.y - NODE_H / 2 } });
@@ -2097,10 +2230,12 @@ export default function CreateTestView({ active, mode = 'create' }) {
                 )}
               </svg>
 
+              {marquee && <div className="board-marquee" style={{ left: marquee.x, top: marquee.y, width: marquee.w, height: marquee.h }} />}
+
               {sc.nodes.map((n) => (
                 <div
                   key={n.id}
-                  className={`bnode kind-${n.kind} ${selectedId === n.id ? 'selected' : ''}`}
+                  className={`bnode kind-${n.kind} ${selectedId === n.id ? 'selected' : ''} ${multiSelected.has(n.id) ? 'multi-selected' : ''}`}
                   style={{ left: n.x, top: n.y, width: NODE_W, height: NODE_H }}
                   onPointerDown={(e) => startDrag(e, n)}
                 >
